@@ -45,11 +45,15 @@ export const healthRoutes = new Elysia({prefix: '/health'})
                     dependencies: {database: 'ok' as const},
                 }
             } catch (error) {
+                console.error('[health] Database readiness check failed', error)
+
                 return Response.json({
                     status: 'unavailable',
                     timestamp: new Date().toISOString(),
                     dependencies: {database: 'unavailable'},
-                    error: error instanceof Error ? error.message : String(error),
+                    ...(!env.isProduction && {
+                        error: error instanceof Error ? error.message : String(error),
+                    }),
                 }, {status: 503})
             }
         },
