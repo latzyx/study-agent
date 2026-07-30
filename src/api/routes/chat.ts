@@ -61,12 +61,20 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                 message: body.message,
                 sessionId: body.sessionId,
                 requestId: getRequestId(request),
+                idempotencyKey: headers['idempotency-key'],
                 abortSignal: request.signal,
             })
 
             return {success: true, data: result}
         },
-        {body: chatBody, detail: {summary: 'Chat (JSON)', security: [{BearerAuth: []}]}},
+        {
+            body: chatBody,
+            detail: {
+                summary: 'Chat (JSON)',
+                description: 'Send Idempotency-Key to safely replay a completed request.',
+                security: [{BearerAuth: []}],
+            },
+        },
     )
     .post(
         '/stream',
@@ -90,6 +98,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                             message: body.message,
                             sessionId: body.sessionId,
                             requestId,
+                            idempotencyKey: headers['idempotency-key'],
                             abortSignal: request.signal,
                         })) {
                             send(event)
@@ -111,7 +120,14 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                 },
             })
         },
-        {body: chatStreamBody, detail: {summary: 'Chat (SSE)', security: [{BearerAuth: []}]}},
+        {
+            body: chatStreamBody,
+            detail: {
+                summary: 'Chat (SSE)',
+                description: 'A successful duplicate Idempotency-Key replays the final text and done event.',
+                security: [{BearerAuth: []}],
+            },
+        },
     )
     .get(
         '/traces',
