@@ -76,8 +76,11 @@ src/intent/
 - 第一、第二候选的歧义判断。
 - 无匹配时回退 `general`。
 - 调用方显式指定 Agent 时，以显式参数为权威来源。
+- 非法分类器权重、未知 Agent 标签和非有限分数直接失败。
 
 后续接入本地 MacBERT、Embedding Router 或 LLM 分类器时，只需实现 `IntentClassifier`，无需修改 Router 主流程。
+
+当前 `/chat` API 仍以数据库 `agentId` 作为显式执行目标；本轮先建立稳定的意图识别领域层和内置 Agent Catalog，避免在数据库 Agent 与内置 Agent 尚无映射关系时偷偷自动切换执行目标。后续应新增明确的 `agentKey -> agentId` 绑定表或路由策略，再接入自动分发。
 
 ## 环境要求
 
