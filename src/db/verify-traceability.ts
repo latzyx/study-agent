@@ -118,6 +118,13 @@ async function verifyTraceability(): Promise<void> {
         trace.toolStarted(1, toolCall)
         trace.toolFinished(1, toolCall, {success: true, result: 3}, 4)
 
+        const danglingToolCall = {
+            id: 'integration-dangling-tool-call',
+            name: 'current_time',
+            input: {timezone: 'UTC'},
+        }
+        trace.toolStarted(1, danglingToolCall)
+
         await telemetry.onStepFinish?.({
             stepNumber: 0,
             model: {provider: 'test-provider', modelId: 'test-model'},
@@ -137,14 +144,14 @@ async function verifyTraceability(): Promise<void> {
             output: {reply: 'done'},
             usage: {inputTokens: 5, outputTokens: 2, totalTokens: 7},
             stepCount: 1,
-            toolCallCount: 1,
+            toolCallCount: 2,
         })
 
         const persisted = await getAiTrace(user.id, trace.traceId)
         assert(persisted.run.status === 'success', 'Trace run did not finish successfully')
         assert(persisted.run.totalTokens === 7, 'Trace token usage was not persisted')
         assert(persisted.run.stepCount === 1, 'Trace step count was not persisted')
-        assert(persisted.run.toolCallCount === 1, 'Trace tool count was not persisted')
+        assert(persisted.run.toolCallCount === 2, 'Trace tool count was not persisted')
         assert(
             persisted.spans.some((span) => span.kind === 'generation' && span.status === 'success'),
             'Generation span was not persisted',
@@ -156,6 +163,14 @@ async function verifyTraceability(): Promise<void> {
         assert(
             persisted.spans.some((span) => span.kind === 'tool' && span.status === 'success'),
             'Tool span was not persisted',
+        )
+        assert(
+            persisted.spans.every((span) => span.status !== 'running'),
+            'Run finalization must close dangling spans',
+        )
+        assert(
+            persisted.spans.some((span) => span.toolCallId === danglingToolCall.id),
+            'Dangling tool span was not retained for investigation',
         )
 
         console.log('[db:verify:traceability] trace persistence and rollback verified')
