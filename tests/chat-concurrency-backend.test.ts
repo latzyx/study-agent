@@ -28,15 +28,17 @@ describe('chat concurrency backend', () => {
         expect(backend.count('chat:session:user-1:session-1')).toBe(0)
     })
 
-    test('uses the strictest limit when the same key appears more than once', async () => {
+    test('uses the strictest limit when the same key appears more than once in one request', async () => {
         const backend = new InMemoryChatConcurrencyBackend()
-        const first = await backend.tryAcquire([
+        const duplicateKeys = [
             {key: 'shared', limit: 3},
             {key: 'shared', limit: 1},
-        ])
+        ]
+        const first = await backend.tryAcquire(duplicateKeys)
 
         expect(first).not.toBeNull()
-        await expect(backend.tryAcquire([{key: 'shared', limit: 3}])).resolves.toBeNull()
+        expect(backend.count('shared')).toBe(1)
+        await expect(backend.tryAcquire(duplicateKeys)).resolves.toBeNull()
         await first?.release()
     })
 
@@ -51,17 +53,16 @@ describe('chat concurrency backend', () => {
     })
 
     test('defines an async backend contract suitable for Redis or database leases', async () => {
-        const calls: readonly ConcurrencyKey[][] = []
-        const mutableCalls = calls as ConcurrencyKey[][]
+        const calls: ConcurrencyKey[][] = []
         const backend: ChatConcurrencyBackend = {
             async tryAcquire(keys) {
-                mutableCalls.push([...keys])
+                calls.push([...keys])
                 return {async release() {}}
             },
         }
 
         const lease = await backend.tryAcquire([{key: 'distributed', limit: 1}])
         await lease?.release()
-        expect(mutableCalls).toEqual([[{key: 'distributed', limit: 1}]])
+        expect(calls).toEqual([[{key: 'distributed', limit: 1}]])
     })
 })
