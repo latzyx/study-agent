@@ -1,6 +1,7 @@
 import {and, desc, eq, sql} from 'drizzle-orm'
 import type {ModelProfile} from '../agent/types/agent.js'
 import {createApiError} from '../api/errors/api-error.js'
+import {inferAgentKeyFromTools} from '../agents/catalog.js'
 import {db} from '../db/index.js'
 import {agents} from '../db/schema.js'
 import {findUnknownBuiltinTools} from '../tools/builtin/index.js'
@@ -43,7 +44,7 @@ export function serializeAgent(agent: typeof agents.$inferSelect) {
 }
 
 function normalizeTools(toolNames: readonly string[] | undefined): string[] {
-    const normalized = [...new Set(toolNames ?? [])]
+    const normalized = [...new Set((toolNames ?? []).map((name) => name.trim()).filter(Boolean))]
     const unknown = findUnknownBuiltinTools(normalized)
 
     if (unknown.length > 0) {
@@ -52,6 +53,17 @@ function normalizeTools(toolNames: readonly string[] | undefined): string[] {
             'UNKNOWN_AGENT_TOOLS',
             `Unknown tools: ${unknown.join(', ')}`,
             {unknownTools: unknown},
+        )
+    }
+
+    try {
+        inferAgentKeyFromTools(normalized)
+    } catch (error) {
+        throw createApiError(
+            400,
+            'MIXED_AGENT_TOOLS',
+            error instanceof Error ? error.message : 'Tools must belong to one agent',
+            {tools: normalized},
         )
     }
 
@@ -86,10 +98,13 @@ export async function listUserAgents(input: AgentListInput) {
 }
 
 export async function createUserAgent(input: CreateAgentInput) {
+    const name = input.name.trim()
+    if (!name) throw createApiError(400, 'INVALID_AGENT_NAME', 'Agent name cannot be empty')
+
     const [created] = await db.insert(agents).values({
-        name: input.name.trim(),
-        description: input.description,
-        systemPrompt: input.systemPrompt,
+        name,
+        description: input.description?.trim() || undefined,
+        systemPrompt: input.systemPrompt?.trim() || undefined,
         modelProfile: input.modelProfile ?? 'general',
         maxSteps: input.maxSteps ?? 5,
         tools: normalizeTools(input.tools),
@@ -118,15 +133,17 @@ export async function updateUserAgent(input: UpdateAgentInput) {
     const changedFields: string[] = []
 
     if (input.name !== undefined) {
-        updateData.name = input.name.trim()
+        const name = input.name.trim()
+        if (!name) throw createApiError(400, 'INVALID_AGENT_NAME', 'Agent name cannot be empty')
+        updateData.name = name
         changedFields.push('name')
     }
     if (input.description !== undefined) {
-        updateData.description = input.description
+        updateData.description = input.description.trim() || null
         changedFields.push('description')
     }
     if (input.systemPrompt !== undefined) {
-        updateData.systemPrompt = input.systemPrompt
+        updateData.systemPrompt = input.systemPrompt.trim() || null
         changedFields.push('systemPrompt')
     }
     if (input.modelProfile !== undefined) {
