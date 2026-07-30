@@ -1,9 +1,13 @@
 import {Elysia, t} from 'elysia'
-import {eq} from 'drizzle-orm'
+import {and, asc, eq} from 'drizzle-orm'
 import {db} from '../../db/index.js'
 import {agents, conversations, messages} from '../../db/schema.js'
-import {chatBody, chatStreamBody, chatResponse} from '../schemas/chat.js'
-import {authPlugin} from '../middleware/auth.js'
+import {chatBody, chatStreamBody} from '../schemas/chat.js'
+import {
+    authenticateAccessToken,
+    authPlugin,
+    unauthorizedResponse,
+} from '../middleware/auth.js'
 import {BaseAgent} from '../../agent/base-agent.js'
 import {AISDKProviderAdapter} from '../../llm/providers/ai-sdk-provider.js'
 import {providerRegistry} from '../../llm/registry/provider-registry.js'
@@ -15,122 +19,257 @@ import type {AgentConfig} from '../../agent/types/agent.js'
 
 const builtinTools = [calculatorTool, currentTimeTool]
 
-async function requireUser(JWT: any, auth: any) {
-    if (!auth?.value) throw new Error('Unauthorized')
-    const payload = await JWT.verify(auth.value)
-    if (!payload) throw new Error('Unauthorized')
-    return payload as {sub: string; username: string}
+type ToolCallRecord = {
+    id: string
+    name: string
+    args: unknown
+    result: unknown
 }
 
-function createAgentFromConfig(agentRow: any): BaseAgent {
-    const toolNames = (agentRow.tools as string[] | null) ?? []
-    const selectedTools = builtinTools.filter((t) => toolNames.includes(t.name))
+function apiError(status: number, code: string, message: string): Response {
+    return Response.json({success: false, error: {code, message}}, {status})
+}
+
+function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
+    const toolNames = agentRow.tools ?? []
+    const selectedTools = builtinTools.filter((tool) => toolNames.includes(tool.name))
+    const modelId = resolveModel(agentRow.modelProfile)
     const config: AgentConfig = {
-        name: agentRow.name, description: agentRow.description ?? '',
+        name: agentRow.name,
+        description: agentRow.description ?? '',
         systemPrompt: agentRow.systemPrompt ?? 'You are a helpful assistant.',
-        modelProfile: agentRow.modelProfile, maxSteps: agentRow.maxSteps,
+        modelProfile: agentRow.modelProfile,
+        modelId,
+        maxSteps: agentRow.maxSteps,
     }
-    const modelId = resolveModel(config.modelProfile)
-    const colonIndex = modelId.indexOf(':')
-    const providerName = colonIndex > -1 ? modelId.substring(0, colonIndex) : modelId
-    const modelName = colonIndex > -1 ? modelId.substring(colonIndex + 1) : modelId
-    const rawProvider = (providerRegistry as any)[providerName]
-    if (!rawProvider) throw new Error(`Unknown provider: ${providerName}`)
-    const model = rawProvider(modelName)
+    const model = providerRegistry.languageModel(modelId as any)
     const llmProvider = new AISDKProviderAdapter(model)
     const toolRegistry = new ToolRegistry()
-    return new (class extends BaseAgent { getTools() { return selectedTools } })(config, llmProvider, toolRegistry)
+
+    return new (class extends BaseAgent {
+        getTools() {
+            return selectedTools
+        }
+    })(config, llmProvider, toolRegistry)
+}
+
+async function findOwnedAgent(userId: string, agentId: string) {
+    const [agent] = await db.select().from(agents).where(and(
+        eq(agents.id, agentId),
+        eq(agents.createdBy, userId),
+    )).limit(1)
+
+    return agent
 }
 
 async function getOrCreateConversation(userId: string, agentId: string, sessionId?: string) {
-    const sid = sessionId ?? crypto.randomUUID()
-    const [existing] = await db.select().from(conversations).where(eq(conversations.userId, userId)).limit(1)
-    if (existing) return {conversation: existing, sessionId: sid}
-    const [conv] = await db.insert(conversations).values({userId, agentId, sessionId: sid}).returning()
-    return {conversation: conv!, sessionId: sid}
+    const resolvedSessionId = sessionId?.trim() || crypto.randomUUID()
+    const [existing] = await db.select().from(conversations).where(and(
+        eq(conversations.userId, userId),
+        eq(conversations.agentId, agentId),
+        eq(conversations.sessionId, resolvedSessionId),
+    )).limit(1)
+
+    if (existing) return existing
+
+    const [created] = await db.insert(conversations).values({
+        userId,
+        agentId,
+        sessionId: resolvedSessionId,
+    }).returning()
+
+    if (!created) throw new Error('Failed to create conversation')
+    return created
+}
+
+function applyAgentEvent(
+    event: Awaited<ReturnType<BaseAgent['run']> extends AsyncGenerator<infer T> ? T : never>,
+    state: {reply: string; toolCalls: ToolCallRecord[]},
+): void {
+    if (event.type === 'text-delta') {
+        state.reply += event.text ?? ''
+        return
+    }
+
+    if (event.type === 'tool-call' && event.toolCall) {
+        state.toolCalls.push({
+            id: event.toolCall.id,
+            name: event.toolCall.name,
+            args: event.toolCall.input,
+            result: null,
+        })
+        return
+    }
+
+    if (event.type === 'tool-result' && event.toolResult) {
+        const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
+        if (call) call.result = event.toolResult.result
+    }
 }
 
 export const chatRoutes = new Elysia({prefix: '/chat'})
     .use(authPlugin)
     .post(
         '/',
-        // @ts-ignore
-        async ({body, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [agentRow] = await db.select().from(agents).where(eq(agents.id, body.agentId)).limit(1)
-            if (!agentRow) return new Response(JSON.stringify({success: false, error: {code: 'AGENT_NOT_FOUND', message: 'Agent not found'}}), {status: 404, headers: {'Content-Type': 'application/json'}})
+        async ({body, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
 
-            const {conversation, sessionId} = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
-            await db.insert(messages).values({conversationId: conversation.id, role: 'user', content: body.message})
+            const agentRow = await findOwnedAgent(user.sub, body.agentId)
+            if (!agentRow) return apiError(404, 'AGENT_NOT_FOUND', 'Agent not found')
 
+            const conversation = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
+            await db.insert(messages).values({
+                conversationId: conversation.id,
+                role: 'user',
+                content: body.message,
+            })
+
+            const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
             const agent = createAgentFromConfig(agentRow)
-            let reply = ''
-            const toolCalls: {name: string; args: unknown; result: unknown}[] = []
 
             for await (const event of agent.run(body.message)) {
-                if (event.type === 'text-delta') reply += event.text ?? ''
-                else if (event.type === 'tool-call') toolCalls.push({name: event.toolCall!.name, args: event.toolCall!.input, result: null})
-                else if (event.type === 'tool-result') {
-                    const last = toolCalls.find((t) => t.name === event.toolResult!.name)
-                    if (last) last.result = event.toolResult!.result
+                applyAgentEvent(event, state)
+                if (event.type === 'error') {
+                    return apiError(502, 'AGENT_EXECUTION_FAILED', event.error?.message ?? 'Agent execution failed')
                 }
             }
 
-            await db.insert(messages).values({conversationId: conversation.id, role: 'assistant', content: reply, toolCalls: toolCalls.length > 0 ? toolCalls : null})
-            return {success: true, data: {reply, sessionId, toolCalls}}
+            await db.insert(messages).values({
+                conversationId: conversation.id,
+                role: 'assistant',
+                content: state.reply,
+                toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+            })
+
+            return {
+                success: true,
+                data: {
+                    reply: state.reply,
+                    sessionId: conversation.sessionId,
+                    toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
+                },
+            }
         },
         {body: chatBody, detail: {summary: 'Chat (JSON)', security: [{BearerAuth: []}]}},
     )
     .post(
         '/stream',
-        // @ts-ignore
-        async ({body, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [agentRow] = await db.select().from(agents).where(eq(agents.id, body.agentId)).limit(1)
-            if (!agentRow) return new Response(JSON.stringify({success: false, error: {code: 'AGENT_NOT_FOUND', message: 'Agent not found'}}), {status: 404, headers: {'Content-Type': 'application/json'}})
+        async ({body, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
 
-            const {conversation, sessionId} = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
-            await db.insert(messages).values({conversationId: conversation.id, role: 'user', content: body.message})
+            const agentRow = await findOwnedAgent(user.sub, body.agentId)
+            if (!agentRow) return apiError(404, 'AGENT_NOT_FOUND', 'Agent not found')
+
+            const conversation = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
+            await db.insert(messages).values({
+                conversationId: conversation.id,
+                role: 'user',
+                content: body.message,
+            })
+
             const agent = createAgentFromConfig(agentRow)
-
             const encoder = new TextEncoder()
-            const sseStream = new ReadableStream({
+            const stream = new ReadableStream({
                 async start(controller) {
-                    let reply = ''
-                    const toolCalls: {name: string; args: unknown; result: unknown}[] = []
-                    for await (const event of agent.run(body.message)) {
-                        if (event.type === 'text-delta') {
-                            reply += event.text ?? ''
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({type: 'text-delta', content: event.text})}\n\n`))
-                        } else if (event.type === 'tool-call') {
-                            toolCalls.push({name: event.toolCall!.name, args: event.toolCall!.input, result: null})
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({type: 'tool-call', name: event.toolCall!.name, args: event.toolCall!.input})}\n\n`))
-                        } else if (event.type === 'tool-result') {
-                            const last = toolCalls.find((t) => t.name === event.toolResult!.name)
-                            if (last) last.result = event.toolResult!.result
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({type: 'tool-result', name: event.toolResult!.name, result: event.toolResult!.result})}\n\n`))
-                        } else if (event.type === 'finish') {
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({type: 'finish', usage: event.usage})}\n\n`))
-                        }
+                    const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
+                    const send = (data: unknown) => {
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
                     }
-                    controller.enqueue(encoder.encode('data: [DONE]\n\n'))
-                    await db.insert(messages).values({conversationId: conversation.id, role: 'assistant', content: reply, toolCalls: toolCalls.length > 0 ? toolCalls : null})
-                    controller.close()
+
+                    try {
+                        for await (const event of agent.run(body.message)) {
+                            applyAgentEvent(event, state)
+
+                            if (event.type === 'text-delta') {
+                                send({type: 'text-delta', content: event.text})
+                            } else if (event.type === 'tool-call' && event.toolCall) {
+                                send({
+                                    type: 'tool-call',
+                                    id: event.toolCall.id,
+                                    name: event.toolCall.name,
+                                    args: event.toolCall.input,
+                                })
+                            } else if (event.type === 'tool-result' && event.toolResult) {
+                                send({
+                                    type: 'tool-result',
+                                    id: event.toolResult.toolCallId,
+                                    name: event.toolResult.name,
+                                    result: event.toolResult.result,
+                                })
+                            } else if (event.type === 'finish') {
+                                send({type: 'finish', usage: event.usage})
+                            } else if (event.type === 'error') {
+                                send({
+                                    type: 'error',
+                                    code: 'AGENT_EXECUTION_FAILED',
+                                    message: event.error?.message ?? 'Agent execution failed',
+                                })
+                                break
+                            }
+                        }
+
+                        await db.insert(messages).values({
+                            conversationId: conversation.id,
+                            role: 'assistant',
+                            content: state.reply,
+                            toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+                        })
+                        send({type: 'done', sessionId: conversation.sessionId})
+                    } catch (error) {
+                        send({
+                            type: 'error',
+                            code: 'STREAM_FAILED',
+                            message: error instanceof Error ? error.message : String(error),
+                        })
+                    } finally {
+                        controller.close()
+                    }
                 },
             })
-            return new Response(sseStream, {headers: {'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive'}})
+
+            return new Response(stream, {
+                headers: {
+                    'Content-Type': 'text/event-stream; charset=utf-8',
+                    'Cache-Control': 'no-cache, no-transform',
+                    Connection: 'keep-alive',
+                    'X-Accel-Buffering': 'no',
+                },
+            })
         },
         {body: chatStreamBody, detail: {summary: 'Chat (SSE)', security: [{BearerAuth: []}]}},
     )
     .get(
         '/history/:sessionId',
-        // @ts-ignore
-        async ({params, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [conv] = await db.select().from(conversations).where(eq(conversations.sessionId, params.sessionId)).limit(1)
-            if (!conv) return new Response(JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'Session not found'}}), {status: 404, headers: {'Content-Type': 'application/json'}})
-            const items = await db.select().from(messages).where(eq(messages.conversationId, conv.id))
-            return {success: true, data: items.map((m) => ({id: m.id, role: m.role, content: m.content ?? undefined, toolCalls: m.toolCalls ?? undefined, createdAt: m.createdAt.toISOString()}))}
+        async ({params, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
+
+            const [conversation] = await db.select().from(conversations).where(and(
+                eq(conversations.sessionId, params.sessionId),
+                eq(conversations.userId, user.sub),
+            )).limit(1)
+            if (!conversation) return apiError(404, 'NOT_FOUND', 'Session not found')
+
+            const items = await db.select()
+                .from(messages)
+                .where(eq(messages.conversationId, conversation.id))
+                .orderBy(asc(messages.createdAt))
+
+            return {
+                success: true,
+                data: items.map((message) => ({
+                    id: message.id,
+                    role: message.role,
+                    content: message.content ?? undefined,
+                    toolCalls: message.toolCalls ?? undefined,
+                    createdAt: message.createdAt.toISOString(),
+                })),
+            }
         },
-        {params: t.Object({sessionId: t.String()}), detail: {summary: 'Get chat history', security: [{BearerAuth: []}]}},
+        {
+            params: t.Object({sessionId: t.String({minLength: 1, maxLength: 100})}),
+            detail: {summary: 'Get chat history', security: [{BearerAuth: []}]},
+        },
     )
