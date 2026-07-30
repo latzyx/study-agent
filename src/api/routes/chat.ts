@@ -1,5 +1,5 @@
 import {Elysia, t} from 'elysia'
-import {and, asc, eq} from 'drizzle-orm'
+import {and, asc, desc, eq} from 'drizzle-orm'
 import {db} from '../../db/index.js'
 import {agents, conversations, messages} from '../../db/schema.js'
 import {chatBody, chatStreamBody} from '../schemas/chat.js'
@@ -15,9 +15,11 @@ import {resolveModel} from '../../llm/registry/model-registry.js'
 import {ToolRegistry} from '../../tools/registry/tool-registry.js'
 import {calculatorTool} from '../../tools/builtin/calculator.tool.js'
 import {currentTimeTool} from '../../tools/builtin/current-time.tool.js'
-import type {AgentConfig} from '../../agent/types/agent.js'
+import type {AgentConfig, AgentEvent} from '../../agent/types/agent.js'
+import type {LLMMessage} from '../../llm/domain/llm-provider.js'
 
 const builtinTools = [calculatorTool, currentTimeTool]
+const HISTORY_MESSAGE_LIMIT = 50
 
 type ToolCallRecord = {
     id: string
@@ -82,8 +84,27 @@ async function getOrCreateConversation(userId: string, agentId: string, sessionI
     return created
 }
 
+async function loadConversationHistory(conversationId: string): Promise<LLMMessage[]> {
+    const recentMessages = await db.select({
+        role: messages.role,
+        content: messages.content,
+    })
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId))
+        .orderBy(desc(messages.createdAt))
+        .limit(HISTORY_MESSAGE_LIMIT)
+
+    return recentMessages
+        .reverse()
+        .filter((message) => typeof message.content === 'string' && message.content.length > 0)
+        .map((message) => ({
+            role: message.role,
+            content: message.content!,
+        }))
+}
+
 function applyAgentEvent(
-    event: Awaited<ReturnType<BaseAgent['run']> extends AsyncGenerator<infer T> ? T : never>,
+    event: AgentEvent,
     state: {reply: string; toolCalls: ToolCallRecord[]},
 ): void {
     if (event.type === 'text-delta') {
@@ -111,7 +132,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     .use(authPlugin)
     .post(
         '/',
-        async ({body, JWT, headers}) => {
+        async ({body, JWT, headers, request}) => {
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
@@ -119,6 +140,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             if (!agentRow) return apiError(404, 'AGENT_NOT_FOUND', 'Agent not found')
 
             const conversation = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
+            const history = await loadConversationHistory(conversation.id)
             await db.insert(messages).values({
                 conversationId: conversation.id,
                 role: 'user',
@@ -128,7 +150,11 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
             const agent = createAgentFromConfig(agentRow)
 
-            for await (const event of agent.run(body.message)) {
+            for await (const event of agent.run(body.message, {
+                history,
+                abortSignal: request.signal,
+                toolContext: {userId: user.sub, sessionId: conversation.sessionId},
+            })) {
                 applyAgentEvent(event, state)
                 if (event.type === 'error') {
                     return apiError(502, 'AGENT_EXECUTION_FAILED', event.error?.message ?? 'Agent execution failed')
@@ -155,7 +181,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     )
     .post(
         '/stream',
-        async ({body, JWT, headers}) => {
+        async ({body, JWT, headers, request}) => {
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
@@ -163,6 +189,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             if (!agentRow) return apiError(404, 'AGENT_NOT_FOUND', 'Agent not found')
 
             const conversation = await getOrCreateConversation(user.sub, body.agentId, body.sessionId)
+            const history = await loadConversationHistory(conversation.id)
             await db.insert(messages).values({
                 conversationId: conversation.id,
                 role: 'user',
@@ -174,12 +201,17 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             const stream = new ReadableStream({
                 async start(controller) {
                     const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
+                    let failed = false
                     const send = (data: unknown) => {
                         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
                     }
 
                     try {
-                        for await (const event of agent.run(body.message)) {
+                        for await (const event of agent.run(body.message, {
+                            history,
+                            abortSignal: request.signal,
+                            toolContext: {userId: user.sub, sessionId: conversation.sessionId},
+                        })) {
                             applyAgentEvent(event, state)
 
                             if (event.type === 'text-delta') {
@@ -201,6 +233,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                             } else if (event.type === 'finish') {
                                 send({type: 'finish', usage: event.usage})
                             } else if (event.type === 'error') {
+                                failed = true
                                 send({
                                     type: 'error',
                                     code: 'AGENT_EXECUTION_FAILED',
@@ -210,13 +243,15 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                             }
                         }
 
-                        await db.insert(messages).values({
-                            conversationId: conversation.id,
-                            role: 'assistant',
-                            content: state.reply,
-                            toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
-                        })
-                        send({type: 'done', sessionId: conversation.sessionId})
+                        if (state.reply || state.toolCalls.length > 0) {
+                            await db.insert(messages).values({
+                                conversationId: conversation.id,
+                                role: 'assistant',
+                                content: state.reply,
+                                toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+                            })
+                        }
+                        if (!failed) send({type: 'done', sessionId: conversation.sessionId})
                     } catch (error) {
                         send({
                             type: 'error',
