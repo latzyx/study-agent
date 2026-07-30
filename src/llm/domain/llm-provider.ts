@@ -6,23 +6,24 @@ export type LLMRole =
     | 'assistant'
     | 'tool'
 
+export interface LLMToolCall {
+    id: string
+    name: string
+    input: unknown
+}
+
 export interface LLMMessage {
     role: LLMRole
     content: string
     name?: string
     toolCallId?: string
+    toolCalls?: LLMToolCall[]
 }
 
 export interface LLMToolDefinition {
     name: string
     description: string
     inputSchema: ZodType<unknown>
-}
-
-export interface LLMToolCall {
-    id: string
-    name: string
-    input: unknown
 }
 
 export interface LLMUsage {
