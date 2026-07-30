@@ -50,6 +50,11 @@ const rawEnvSchema = z.object({
     LLM_MODEL_REASONING: z.string().trim().min(1).default('openai:gpt-5-mini'),
     LLM_MODEL_VISION: z.string().trim().min(1).default('openai:gpt-5-mini'),
     LLM_MODEL_FALLBACK: z.string().trim().min(1).default('anthropic:claude-sonnet-4-5'),
+    LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30 * 60 * 1000).default(120_000),
+    LLM_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+    LLM_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(10).max(10_000).default(250),
+    LLM_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(5),
+    LLM_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).max(60 * 60 * 1000).default(30_000),
 
     OPENAI_API_KEY: z.string().optional(),
     ANTHROPIC_API_KEY: z.string().optional(),
@@ -159,6 +164,11 @@ export const env = Object.freeze({
         fallback: raw.LLM_MODEL_FALLBACK,
     },
     providers: {
+        requestTimeoutMs: raw.LLM_REQUEST_TIMEOUT_MS,
+        maxRetries: raw.LLM_MAX_RETRIES,
+        retryBaseDelayMs: raw.LLM_RETRY_BASE_DELAY_MS,
+        circuitFailureThreshold: raw.LLM_CIRCUIT_FAILURE_THRESHOLD,
+        circuitResetMs: raw.LLM_CIRCUIT_RESET_MS,
         openaiApiKey: raw.OPENAI_API_KEY,
         anthropicApiKey: raw.ANTHROPIC_API_KEY,
         lmStudioBaseUrl: raw.LM_STUDIO_BASE_URL,
