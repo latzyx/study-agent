@@ -1,7 +1,7 @@
 import {Elysia, t} from 'elysia'
-import {and, desc, eq, gte, lte, sql, type SQL} from 'drizzle-orm'
+import {and, asc, desc, eq, gte, lte, sql, type SQL} from 'drizzle-orm'
 import {db} from '../../db/index.js'
-import {auditLogs, operationLogs} from '../../db/schema.js'
+import {aiRuns, aiSpans, auditLogs, operationLogs} from '../../db/schema.js'
 import {createApiError} from '../errors/api-error.js'
 import {authPlugin, requireAdminAccess} from '../middleware/auth.js'
 
@@ -14,6 +14,23 @@ const logQuery = t.Object({
     path: t.Optional(t.String({maxLength: 255})),
     requestId: t.Optional(t.String({maxLength: 100})),
     statusCode: t.Optional(t.Number({minimum: 100, maximum: 599})),
+    startDate: t.Optional(t.String()),
+    endDate: t.Optional(t.String()),
+})
+
+const traceQuery = t.Object({
+    page: t.Optional(t.Number({default: 1, minimum: 1})),
+    pageSize: t.Optional(t.Number({default: 20, minimum: 1, maximum: 100})),
+    userId: t.Optional(t.String({format: 'uuid'})),
+    agentId: t.Optional(t.String({format: 'uuid'})),
+    sessionId: t.Optional(t.String({maxLength: 100})),
+    requestId: t.Optional(t.String({maxLength: 100})),
+    status: t.Optional(t.Union([
+        t.Literal('running'),
+        t.Literal('success'),
+        t.Literal('error'),
+        t.Literal('aborted'),
+    ])),
     startDate: t.Optional(t.String()),
     endDate: t.Optional(t.String()),
 })
@@ -42,6 +59,37 @@ function resolveDateRange(startValue?: string, endValue?: string) {
     }
 
     return {startDate, endDate}
+}
+
+function serializeAiRun(run: typeof aiRuns.$inferSelect) {
+    return {
+        ...run,
+        userId: run.userId ?? undefined,
+        agentId: run.agentId ?? undefined,
+        conversationId: run.conversationId ?? undefined,
+        requestId: run.requestId ?? undefined,
+        sessionId: run.sessionId ?? undefined,
+        inputSnapshot: run.inputSnapshot ?? undefined,
+        outputSnapshot: run.outputSnapshot ?? undefined,
+        metadata: run.metadata ?? undefined,
+        startedAt: run.startedAt.toISOString(),
+        finishedAt: run.finishedAt?.toISOString(),
+        createdAt: run.createdAt.toISOString(),
+    }
+}
+
+function serializeAiSpan(span: typeof aiSpans.$inferSelect) {
+    return {
+        ...span,
+        parentSpanKey: span.parentSpanKey ?? undefined,
+        toolCallId: span.toolCallId ?? undefined,
+        inputSnapshot: span.inputSnapshot ?? undefined,
+        outputSnapshot: span.outputSnapshot ?? undefined,
+        metadata: span.metadata ?? undefined,
+        startedAt: span.startedAt.toISOString(),
+        finishedAt: span.finishedAt?.toISOString(),
+        createdAt: span.createdAt.toISOString(),
+    }
 }
 
 export const adminRoutes = new Elysia({prefix: '/admin'})
@@ -133,4 +181,73 @@ export const adminRoutes = new Elysia({prefix: '/admin'})
             }
         },
         {query: logQuery, detail: {summary: 'Query operation logs', security: [{BearerAuth: []}]}},
+    )
+    .get(
+        '/ai-traces',
+        async ({JWT, headers, query}) => {
+            await requireAdminAccess(JWT, headers.authorization)
+            const page = query.page ?? 1
+            const pageSize = query.pageSize ?? 20
+            const offset = (page - 1) * pageSize
+            const conditions: SQL[] = []
+            const {startDate, endDate} = resolveDateRange(query.startDate, query.endDate)
+
+            if (query.userId) conditions.push(eq(aiRuns.userId, query.userId))
+            if (query.agentId) conditions.push(eq(aiRuns.agentId, query.agentId))
+            if (query.sessionId) conditions.push(eq(aiRuns.sessionId, query.sessionId))
+            if (query.requestId) conditions.push(eq(aiRuns.requestId, query.requestId))
+            if (query.status) conditions.push(eq(aiRuns.status, query.status))
+            if (startDate) conditions.push(gte(aiRuns.createdAt, startDate))
+            if (endDate) conditions.push(lte(aiRuns.createdAt, endDate))
+            const where = conditions.length > 0 ? and(...conditions) : undefined
+
+            const [countResult, items] = await Promise.all([
+                db.select({count: sql<number>`count(*)::int`})
+                    .from(aiRuns)
+                    .where(where)
+                    .then((rows) => rows[0]),
+                db.select()
+                    .from(aiRuns)
+                    .where(where)
+                    .orderBy(desc(aiRuns.createdAt))
+                    .limit(pageSize)
+                    .offset(offset),
+            ])
+
+            return {
+                success: true,
+                data: items.map(serializeAiRun),
+                pagination: {page, pageSize, total: countResult?.count ?? 0},
+            }
+        },
+        {
+            query: traceQuery,
+            detail: {summary: 'Query AI traces across users', security: [{BearerAuth: []}]},
+        },
+    )
+    .get(
+        '/ai-traces/:traceId',
+        async ({JWT, headers, params}) => {
+            await requireAdminAccess(JWT, headers.authorization)
+            const [run] = await db.select().from(aiRuns)
+                .where(eq(aiRuns.traceId, params.traceId))
+                .limit(1)
+            if (!run) throw createApiError(404, 'TRACE_NOT_FOUND', 'AI trace not found')
+
+            const spans = await db.select().from(aiSpans)
+                .where(eq(aiSpans.runId, run.id))
+                .orderBy(asc(aiSpans.startedAt))
+
+            return {
+                success: true,
+                data: {
+                    run: serializeAiRun(run),
+                    spans: spans.map(serializeAiSpan),
+                },
+            }
+        },
+        {
+            params: t.Object({traceId: t.String({format: 'uuid'})}),
+            detail: {summary: 'Get any AI trace with spans', security: [{BearerAuth: []}]},
+        },
     )
