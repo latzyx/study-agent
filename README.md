@@ -91,7 +91,18 @@ bun run cli -- "123 * 456 等于多少"
 bun run cli
 ```
 
-交互模式输入 `/exit` 或 `/quit` 退出。CLI 不依赖数据库。
+CLI 不再使用同时挂载所有 Tool 的旧通用 Agent。每次输入执行：
+
+```text
+用户输入
+→ IntentRouter
+→ general / math / time
+→ createBuiltinAgentRuntime
+→ AgentRuntimeFactory
+→ 仅加载该 Agent 拥有的 Tool
+```
+
+意图歧义时 CLI 会要求补充问题，不会偷偷选择默认专业 Agent。交互模式输入 `/exit` 或 `/quit` 退出，且不依赖数据库。
 
 ## Agent Runtime Factory
 
@@ -122,6 +133,8 @@ Factory 的模型解析、Tool 解析、Provider 和 Registry 创建函数均可
 - MCP Tool Adapter
 - 测试 Runtime
 - 分布式 Agent Runtime
+
+`createBuiltinAgentRuntime(agentKey)` 则把内置 Agent Catalog 转换成同一 Runtime 描述，供 CLI、后台任务和未来自动路由复用。
 
 ## Agent 与 Tool 目录
 
