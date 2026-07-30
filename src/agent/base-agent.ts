@@ -5,6 +5,7 @@ import type {ToolRegistry} from '../tools/registry/tool-registry'
 
 export abstract class BaseAgent implements Agent {
     private toolsRegistered = false
+    private agentTools: ReadonlyMap<string, Tool> | undefined
 
     constructor(
         public config: AgentConfig,
@@ -14,22 +15,41 @@ export abstract class BaseAgent implements Agent {
 
     abstract getTools(): Tool[]
 
-    private ensureToolsRegistered(): void {
-        if (this.toolsRegistered) return
+    private ensureToolsRegistered(): ReadonlyMap<string, Tool> {
+        if (this.toolsRegistered && this.agentTools) return this.agentTools
 
-        for (const tool of this.getTools()) this.toolRegistry.register(tool)
+        const tools = this.getTools()
+        const toolMap = new Map<string, Tool>()
+
+        for (const tool of tools) {
+            if (toolMap.has(tool.name)) {
+                throw new Error(`Agent tool declared more than once: ${tool.name}`)
+            }
+
+            this.toolRegistry.register(tool)
+            toolMap.set(tool.name, tool)
+        }
+
+        this.agentTools = toolMap
         this.toolsRegistered = true
+        return toolMap
     }
 
     async *run(input: string, options: AgentRunOptions = {}): AsyncGenerator<AgentEvent> {
-        this.ensureToolsRegistered()
+        const agentTools = this.ensureToolsRegistered()
+        const normalizedInput = input.trim()
+
+        if (!normalizedInput) {
+            yield {type: 'error', error: new Error('Agent input cannot be empty')}
+            return
+        }
 
         const messages = [
             {role: 'system' as const, content: this.config.systemPrompt},
             ...(options.history ?? []).filter((message) => message.role !== 'system'),
-            {role: 'user' as const, content: input},
+            {role: 'user' as const, content: normalizedInput},
         ]
-        const tools = this.toolRegistry.list().map((tool) => ({
+        const tools = [...agentTools.values()].map((tool) => ({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema as any,
@@ -55,6 +75,14 @@ export abstract class BaseAgent implements Agent {
                 }
 
                 if (event.type === 'tool-call') {
+                    if (!agentTools.has(event.toolCall.name)) {
+                        yield {
+                            type: 'error',
+                            error: new Error(`Model requested a tool not enabled for this agent: ${event.toolCall.name}`),
+                        }
+                        return
+                    }
+
                     pendingToolCalls.push(event.toolCall)
                     yield {type: 'tool-call', toolCall: event.toolCall}
                     continue
@@ -100,8 +128,10 @@ export abstract class BaseAgent implements Agent {
                         },
                     }
                     messages.push({
-                        role: 'user',
-                        content: `Tool ${toolCall.name} result: ${JSON.stringify(result)}`,
+                        role: 'tool',
+                        name: toolCall.name,
+                        toolCallId: toolCall.id,
+                        content: JSON.stringify(result),
                     })
                 } catch (error) {
                     yield {
