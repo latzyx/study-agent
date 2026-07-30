@@ -4,21 +4,26 @@ import type {Tool} from '../tools/domain/tool'
 import type {ToolRegistry} from '../tools/registry/tool-registry'
 
 export abstract class BaseAgent implements Agent {
+    private toolsRegistered = false
+
     constructor(
         public config: AgentConfig,
         protected readonly llmProvider: LLMProvider,
         protected readonly toolRegistry: ToolRegistry,
-    ) {
-        this.registerTools()
-    }
+    ) {}
 
     abstract getTools(): Tool[]
 
-    protected registerTools(): void {
+    private ensureToolsRegistered(): void {
+        if (this.toolsRegistered) return
+
         for (const tool of this.getTools()) this.toolRegistry.register(tool)
+        this.toolsRegistered = true
     }
 
     async *run(input: string, options: AgentRunOptions = {}): AsyncGenerator<AgentEvent> {
+        this.ensureToolsRegistered()
+
         const messages = [
             {role: 'system' as const, content: this.config.systemPrompt},
             ...(options.history ?? []).filter((message) => message.role !== 'system'),
