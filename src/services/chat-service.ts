@@ -11,6 +11,11 @@ import {resolveModel} from '../llm/registry/model-registry.js'
 import {providerRegistry} from '../llm/registry/provider-registry.js'
 import {resolveBuiltinTools} from '../tools/builtin/index.js'
 import {ToolRegistry} from '../tools/registry/tool-registry.js'
+import {
+    createAiTrace,
+    type DatabaseAgentTrace,
+    finishAiTrace,
+} from './ai-trace-service.js'
 import {findUserAgent} from './agent-service.js'
 import {acquireChatExecutionLease, type ConcurrencyLease} from './chat-concurrency-service.js'
 
@@ -21,6 +26,7 @@ export interface ChatInput {
     agentId: string
     message: string
     sessionId?: string
+    requestId?: string
     abortSignal?: AbortSignal
 }
 
@@ -34,6 +40,7 @@ export interface ToolCallRecord {
 export interface ChatResult {
     reply: string
     sessionId: string
+    traceId?: string
     toolCalls: Array<Omit<ToolCallRecord, 'id'>>
 }
 
@@ -42,19 +49,31 @@ export type ChatStreamEvent =
     | {type: 'tool-call'; id: string; name: string; args: unknown}
     | {type: 'tool-result'; id: string; name: string; result: unknown}
     | {type: 'finish'; usage?: LLMUsage}
-    | {type: 'done'; sessionId: string}
+    | {type: 'done'; sessionId: string; traceId?: string}
 
 interface PreparedExecution {
     agent: BaseAgent
     conversation: typeof conversations.$inferSelect
     history: LLMMessage[]
     lease: ConcurrencyLease
+    trace?: DatabaseAgentTrace
+}
+
+interface ExecutionState {
+    reply: string
+    toolCalls: ToolCallRecord[]
+    stepCount: number
+    usage?: LLMUsage
 }
 
 function publicExecutionError(error?: Error): string {
     return env.isProduction
         ? 'Agent execution failed'
         : error?.message ?? 'Agent execution failed'
+}
+
+function normalizeError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error))
 }
 
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
@@ -154,10 +173,9 @@ async function loadConversationHistory(conversationId: string): Promise<LLMMessa
         }))
 }
 
-function applyAgentEvent(
-    event: AgentEvent,
-    state: {reply: string; toolCalls: ToolCallRecord[]},
-): void {
+function applyAgentEvent(event: AgentEvent, state: ExecutionState): void {
+    state.stepCount = Math.max(state.stepCount, event.stepNumber ?? 0)
+
     if (event.type === 'text-delta') {
         state.reply += event.text ?? ''
         return
@@ -176,12 +194,17 @@ function applyAgentEvent(
     if (event.type === 'tool-result' && event.toolResult) {
         const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
         if (call) call.result = event.toolResult.result
+        return
+    }
+
+    if (event.type === 'finish') {
+        state.usage = event.usage
     }
 }
 
 async function persistAssistantMessage(
     conversationId: string,
-    state: {reply: string; toolCalls: ToolCallRecord[]},
+    state: Pick<ExecutionState, 'reply' | 'toolCalls'>,
 ): Promise<void> {
     if (!state.reply && state.toolCalls.length === 0) return
 
@@ -193,6 +216,59 @@ async function persistAssistantMessage(
     })
 }
 
+async function createTraceSafely(input: ChatInput, conversation: typeof conversations.$inferSelect) {
+    if (!env.tracing.enabled) return undefined
+
+    try {
+        return await createAiTrace({
+            requestId: input.requestId,
+            userId: input.userId,
+            agentId: input.agentId,
+            conversationId: conversation.id,
+            sessionId: conversation.sessionId,
+            functionId: 'study-agent.chat',
+            input: {
+                message: input.message,
+                historyLimit: HISTORY_MESSAGE_LIMIT,
+            },
+            metadata: {
+                transport: input.requestId ? 'http' : 'internal',
+            },
+        })
+    } catch (error) {
+        console.error('[chat] Failed to initialize AI trace; continuing without tracing', error)
+        return undefined
+    }
+}
+
+async function finishTraceSafely(
+    trace: DatabaseAgentTrace | undefined,
+    state: ExecutionState,
+    status: 'success' | 'error' | 'aborted',
+    error?: Error,
+): Promise<void> {
+    if (!trace) return
+
+    try {
+        await finishAiTrace(trace, {
+            status,
+            output: {
+                reply: state.reply,
+                toolCalls: state.toolCalls,
+            },
+            usage: state.usage,
+            stepCount: state.stepCount,
+            toolCallCount: state.toolCalls.length,
+            error,
+        })
+    } catch (traceError) {
+        console.error('[chat] Failed to finalize AI trace', {
+            traceId: trace.traceId,
+            error: traceError,
+        })
+    }
+}
+
 async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
     const agentRow = await findUserAgent(input.userId, input.agentId)
     const conversation = await getOrCreateConversation(
@@ -201,9 +277,11 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
         input.sessionId,
     )
     const lease = acquireChatExecutionLease(input.userId, conversation.sessionId)
+    let trace: DatabaseAgentTrace | undefined
 
     try {
         const history = await loadConversationHistory(conversation.id)
+        trace = await createTraceSafely(input, conversation)
         await db.insert(messages).values({
             conversationId: conversation.id,
             role: 'user',
@@ -215,21 +293,35 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
             conversation,
             history,
             lease,
+            trace,
         }
     } catch (error) {
+        if (trace) {
+            await finishTraceSafely(
+                trace,
+                {reply: '', toolCalls: [], stepCount: 0},
+                'error',
+                normalizeError(error),
+            )
+        }
         lease.release()
         throw error
     }
 }
 
+function createExecutionState(): ExecutionState {
+    return {reply: '', toolCalls: [], stepCount: 0}
+}
+
 export async function executeChat(input: ChatInput): Promise<ChatResult> {
     const execution = await prepareExecution(input)
-    const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
+    const state = createExecutionState()
 
     try {
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
             abortSignal: input.abortSignal,
+            trace: execution.trace,
             toolContext: {
                 userId: input.userId,
                 sessionId: execution.conversation.sessionId,
@@ -246,11 +338,25 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
         }
 
         await persistAssistantMessage(execution.conversation.id, state)
+        await finishTraceSafely(execution.trace, state, 'success')
         return {
             reply: state.reply,
             sessionId: execution.conversation.sessionId,
+            traceId: execution.trace?.traceId,
             toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
         }
+    } catch (error) {
+        await persistAssistantMessage(execution.conversation.id, state).catch((persistError) => {
+            console.error('[chat] Failed to persist partial assistant message', persistError)
+        })
+        const normalizedError = normalizeError(error)
+        await finishTraceSafely(
+            execution.trace,
+            state,
+            input.abortSignal?.aborted ? 'aborted' : 'error',
+            normalizedError,
+        )
+        throw error
     } finally {
         execution.lease.release()
     }
@@ -258,13 +364,13 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
 
 export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEvent> {
     const execution = await prepareExecution(input)
-    const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
-    let failed = false
+    const state = createExecutionState()
 
     try {
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
             abortSignal: input.abortSignal,
+            trace: execution.trace,
             toolContext: {
                 userId: input.userId,
                 sessionId: execution.conversation.sessionId,
@@ -291,7 +397,6 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             } else if (event.type === 'finish') {
                 yield {type: 'finish', usage: event.usage}
             } else if (event.type === 'error') {
-                failed = true
                 throw createApiError(
                     502,
                     'AGENT_EXECUTION_FAILED',
@@ -301,9 +406,26 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
         }
 
         await persistAssistantMessage(execution.conversation.id, state)
-        if (!failed && !input.abortSignal?.aborted) {
-            yield {type: 'done', sessionId: execution.conversation.sessionId}
+        await finishTraceSafely(execution.trace, state, 'success')
+        if (!input.abortSignal?.aborted) {
+            yield {
+                type: 'done',
+                sessionId: execution.conversation.sessionId,
+                traceId: execution.trace?.traceId,
+            }
         }
+    } catch (error) {
+        await persistAssistantMessage(execution.conversation.id, state).catch((persistError) => {
+            console.error('[chat] Failed to persist partial streaming response', persistError)
+        })
+        const normalizedError = normalizeError(error)
+        await finishTraceSafely(
+            execution.trace,
+            state,
+            input.abortSignal?.aborted ? 'aborted' : 'error',
+            normalizedError,
+        )
+        throw error
     } finally {
         execution.lease.release()
     }
