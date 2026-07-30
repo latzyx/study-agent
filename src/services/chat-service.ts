@@ -215,7 +215,7 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
 
     const agentRow = await findUserAgent(input.userId, input.agentId)
     const conversation = await getOrCreateConversation(input.userId, input.agentId, input.sessionId)
-    const lease = acquireChatExecutionLease(input.userId, conversation.sessionId)
+    const lease = await acquireChatExecutionLease(input.userId, conversation.sessionId)
 
     try {
         return {
@@ -226,7 +226,7 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
             lease,
         }
     } catch (error) {
-        lease.release()
+        await lease.release()
         throw error
     }
 }
@@ -264,7 +264,7 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
             toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
         }
     } finally {
-        execution.lease.release()
+        await execution.lease.release()
     }
 }
 
@@ -311,7 +311,7 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
         }
         yield {type: 'done', sessionId: execution.conversation.sessionId}
     } finally {
-        execution.lease.release()
+        await execution.lease.release()
     }
 }
 
