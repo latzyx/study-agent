@@ -8,11 +8,7 @@ import {
     updateUserAgent,
 } from '../../services/agent-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
-import {
-    authenticateAccessToken,
-    authPlugin,
-    unauthorizedResponse,
-} from '../middleware/auth.js'
+import {authPlugin, requireAccessToken} from '../middleware/auth.js'
 import {agentListQuery, createAgentBody, updateAgentBody} from '../schemas/agent.js'
 
 export const agentRoutes = new Elysia({prefix: '/agents'})
@@ -20,9 +16,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .get(
         '/',
         async ({JWT, headers, query}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const page = query.page ?? 1
             const pageSize = query.pageSize ?? 20
             const result = await listUserAgents({userId: user.sub, page, pageSize})
@@ -41,9 +35,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .post(
         '/',
         async ({body, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const agent = await createUserAgent({
                 userId: user.sub,
                 name: body.name,
@@ -77,9 +69,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .get(
         '/:id',
         async ({params, JWT, headers}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const agent = await findUserAgent(user.sub, params.id)
             return {success: true, data: serializeAgent(agent)}
         },
@@ -91,9 +81,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .put(
         '/:id',
         async ({params, body, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const result = await updateUserAgent({
                 userId: user.sub,
                 agentId: params.id,
@@ -125,9 +113,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .delete(
         '/:id',
         async ({params, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const deleted = await deleteUserAgent(user.sub, params.id)
             await recordAuditLog({
                 userId: user.sub,
