@@ -1,33 +1,32 @@
 import type {Tool} from '../domain/tool.js'
-import {calculatorSchema, calculatorTool} from './calculator.tool.js'
-import {currentTimeSchema, currentTimeTool} from './current-time.tool.js'
+import {
+    getToolOwner,
+    listBuiltinTools,
+    resolveBuiltinTool,
+} from '../../agents/catalog.js'
+import {calculatorSchema, calculatorTool} from '../../agents/math/index.js'
+import {currentTimeSchema, currentTimeTool} from '../../agents/time/index.js'
 
 export {
     calculatorSchema,
     calculatorTool,
     currentTimeSchema,
     currentTimeTool,
+    getToolOwner,
 }
 
-export const builtinTools = [
-    calculatorTool,
-    currentTimeTool,
-] satisfies readonly Tool<any, any>[]
-
-const builtinToolMap = new Map<string, Tool<any, any>>(
-    builtinTools.map((tool) => [tool.name, tool]),
-)
+export const builtinTools: readonly Tool[] = listBuiltinTools()
 
 export function listBuiltinToolNames(): string[] {
-    return [...builtinToolMap.keys()]
+    return builtinTools.map((tool) => tool.name)
 }
 
 export function findUnknownBuiltinTools(names: readonly string[]): string[] {
-    return [...new Set(names)].filter((name) => !builtinToolMap.has(name))
+    return [...new Set(names)].filter((name) => !resolveBuiltinTool(name))
 }
 
-export function resolveBuiltinTools(names: readonly string[]): Tool<any, any>[] {
+export function resolveBuiltinTools(names: readonly string[]): Tool[] {
     return [...new Set(names)]
-        .map((name) => builtinToolMap.get(name))
-        .filter((tool): tool is Tool<any, any> => Boolean(tool))
+        .map((name) => resolveBuiltinTool(name))
+        .filter((tool): tool is Tool => Boolean(tool))
 }
