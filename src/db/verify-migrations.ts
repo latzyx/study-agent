@@ -95,6 +95,10 @@ const REQUIRED_INDEXES = [
     'files_user_created_at_idx',
 ]
 
+const REQUIRED_TRIGGERS = [
+    'ai_runs_finalize_spans_trigger',
+]
+
 function assertPresent(kind: string, expected: readonly string[], actual: Set<string>): void {
     const missing = expected.filter((name) => !actual.has(name))
     if (missing.length > 0) throw new Error(`Missing ${kind}: ${missing.join(', ')}`)
@@ -150,11 +154,22 @@ async function verify(): Promise<void> {
     `
     assertPresent('indexes', REQUIRED_INDEXES, new Set(indexRows.map((row) => row.indexname)))
 
+    const triggerRows = await sql<{trigger_name: string}[]>`
+        select trigger_name
+        from information_schema.triggers
+        where trigger_schema = current_schema()
+    `
+    assertPresent(
+        'triggers',
+        REQUIRED_TRIGGERS,
+        new Set(triggerRows.map((row) => row.trigger_name)),
+    )
+
     const [migrationCount] = await sql<{count: number}[]>`
         select count(*)::int as count from study_agent_schema_migrations
     `
-    if ((migrationCount?.count ?? 0) < 2) {
-        throw new Error('Expected at least two applied migration records')
+    if ((migrationCount?.count ?? 0) < 3) {
+        throw new Error('Expected at least three applied migration records')
     }
 
     console.log('[db:verify] migrated schema verified')
