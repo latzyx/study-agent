@@ -37,13 +37,20 @@ export type LLMTelemetryMetadataValue =
     | Array<null | undefined | number>
     | Array<null | undefined | boolean>
 
+export type LLMTelemetryCallback = (event: unknown) => void | PromiseLike<void>
+
 export interface LLMTelemetrySettings {
     isEnabled: boolean
     recordInputs?: boolean
     recordOutputs?: boolean
     functionId?: string
     metadata?: Record<string, LLMTelemetryMetadataValue>
-    integrations?: unknown[]
+    onStart?: LLMTelemetryCallback
+    onStepStart?: LLMTelemetryCallback
+    onToolCallStart?: LLMTelemetryCallback
+    onToolCallFinish?: LLMTelemetryCallback
+    onStepFinish?: LLMTelemetryCallback
+    onFinish?: LLMTelemetryCallback
 }
 
 export interface LLMRequest {
