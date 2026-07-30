@@ -1,9 +1,9 @@
 import {drizzle} from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
-import {env} from '../config/env.js'
+import {env, requireDatabaseUrl} from '../config/env.js'
 import * as schema from './schema.js'
 
-export const sql = postgres(env.database.url, {
+export const sql = postgres(requireDatabaseUrl(), {
     max: env.database.maxConnections,
     idle_timeout: env.database.idleTimeoutSeconds,
     connect_timeout: env.database.connectTimeoutSeconds,
