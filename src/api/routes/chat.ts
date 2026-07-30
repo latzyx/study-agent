@@ -1,22 +1,24 @@
 import {Elysia, t} from 'elysia'
 import {and, asc, desc, eq} from 'drizzle-orm'
+import {BaseAgent} from '../../agent/base-agent.js'
+import type {AgentConfig, AgentEvent} from '../../agent/types/agent.js'
+import {env} from '../../config/env.js'
 import {db} from '../../db/index.js'
 import {agents, conversations, messages} from '../../db/schema.js'
-import {chatBody, chatStreamBody} from '../schemas/chat.js'
+import type {LLMMessage} from '../../llm/domain/llm-provider.js'
+import {AISDKProviderAdapter} from '../../llm/providers/ai-sdk-provider.js'
+import {providerRegistry} from '../../llm/registry/provider-registry.js'
+import {resolveModel} from '../../llm/registry/model-registry.js'
+import {calculatorTool} from '../../tools/builtin/calculator.tool.js'
+import {currentTimeTool} from '../../tools/builtin/current-time.tool.js'
+import {ToolRegistry} from '../../tools/registry/tool-registry.js'
+import {createApiError} from '../errors/api-error.js'
 import {
     authenticateAccessToken,
     authPlugin,
     unauthorizedResponse,
 } from '../middleware/auth.js'
-import {BaseAgent} from '../../agent/base-agent.js'
-import {AISDKProviderAdapter} from '../../llm/providers/ai-sdk-provider.js'
-import {providerRegistry} from '../../llm/registry/provider-registry.js'
-import {resolveModel} from '../../llm/registry/model-registry.js'
-import {ToolRegistry} from '../../tools/registry/tool-registry.js'
-import {calculatorTool} from '../../tools/builtin/calculator.tool.js'
-import {currentTimeTool} from '../../tools/builtin/current-time.tool.js'
-import type {AgentConfig, AgentEvent} from '../../agent/types/agent.js'
-import type {LLMMessage} from '../../llm/domain/llm-provider.js'
+import {chatBody, chatStreamBody} from '../schemas/chat.js'
 
 const builtinTools = [calculatorTool, currentTimeTool]
 const HISTORY_MESSAGE_LIMIT = 50
@@ -32,9 +34,14 @@ function apiError(status: number, code: string, message: string): Response {
     return Response.json({success: false, error: {code, message}}, {status})
 }
 
+function publicExecutionError(error?: Error): string {
+    return env.isProduction
+        ? 'Agent execution failed'
+        : error?.message ?? 'Agent execution failed'
+}
+
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
-    const toolNames = agentRow.tools ?? []
-    const selectedTools = builtinTools.filter((tool) => toolNames.includes(tool.name))
+    const selectedTools = builtinTools.filter((tool) => agentRow.tools.includes(tool.name))
     const modelId = resolveModel(agentRow.modelProfile)
     const config: AgentConfig = {
         name: agentRow.name,
@@ -45,14 +52,12 @@ function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent 
         maxSteps: agentRow.maxSteps,
     }
     const model = providerRegistry.languageModel(modelId as any)
-    const llmProvider = new AISDKProviderAdapter(model)
-    const toolRegistry = new ToolRegistry()
 
     return new (class extends BaseAgent {
         getTools() {
             return selectedTools
         }
-    })(config, llmProvider, toolRegistry)
+    })(config, new AISDKProviderAdapter(model), new ToolRegistry())
 }
 
 async function findOwnedAgent(userId: string, agentId: string) {
@@ -64,30 +69,67 @@ async function findOwnedAgent(userId: string, agentId: string) {
     return agent
 }
 
-async function getOrCreateConversation(userId: string, agentId: string, sessionId?: string) {
-    const resolvedSessionId = sessionId?.trim() || crypto.randomUUID()
-    const [existing] = await db.select().from(conversations).where(and(
+async function findConversationBySession(userId: string, sessionId: string) {
+    const [conversation] = await db.select().from(conversations).where(and(
         eq(conversations.userId, userId),
-        eq(conversations.agentId, agentId),
-        eq(conversations.sessionId, resolvedSessionId),
+        eq(conversations.sessionId, sessionId),
     )).limit(1)
 
-    if (existing) return existing
+    return conversation
+}
 
-    const [created] = await db.insert(conversations).values({
-        userId,
-        agentId,
-        sessionId: resolvedSessionId,
-    }).returning()
+function ensureConversationAgent(
+    conversation: typeof conversations.$inferSelect,
+    agentId: string,
+) {
+    if (conversation.agentId !== agentId) {
+        throw createApiError(
+            409,
+            'SESSION_AGENT_MISMATCH',
+            'The session is already associated with another agent',
+        )
+    }
 
-    if (!created) throw new Error('Failed to create conversation')
-    return created
+    return conversation
+}
+
+async function getOrCreateConversation(userId: string, agentId: string, sessionId?: string) {
+    const resolvedSessionId = sessionId?.trim() || crypto.randomUUID()
+    const existing = await findConversationBySession(userId, resolvedSessionId)
+    if (existing) return ensureConversationAgent(existing, agentId)
+
+    const [created] = await db.insert(conversations)
+        .values({userId, agentId, sessionId: resolvedSessionId})
+        .onConflictDoNothing({
+            target: [conversations.userId, conversations.sessionId],
+        })
+        .returning()
+
+    if (created) return created
+
+    const concurrent = await findConversationBySession(userId, resolvedSessionId)
+    if (!concurrent) {
+        throw createApiError(500, 'CONVERSATION_CREATE_FAILED', 'Failed to create conversation')
+    }
+
+    return ensureConversationAgent(concurrent, agentId)
+}
+
+function historyContent(message: {
+    content: string | null
+    toolCalls: unknown
+}): string | null {
+    const parts: string[] = []
+    if (message.content?.trim()) parts.push(message.content)
+    if (message.toolCalls) parts.push(`Tool activity: ${JSON.stringify(message.toolCalls)}`)
+    return parts.length > 0 ? parts.join('\n') : null
 }
 
 async function loadConversationHistory(conversationId: string): Promise<LLMMessage[]> {
     const recentMessages = await db.select({
         role: messages.role,
         content: messages.content,
+        toolCalls: messages.toolCalls,
     })
         .from(messages)
         .where(eq(messages.conversationId, conversationId))
@@ -96,10 +138,11 @@ async function loadConversationHistory(conversationId: string): Promise<LLMMessa
 
     return recentMessages
         .reverse()
-        .filter((message) => typeof message.content === 'string' && message.content.length > 0)
+        .map((message) => ({...message, normalizedContent: historyContent(message)}))
+        .filter((message) => message.normalizedContent !== null)
         .map((message) => ({
             role: message.role,
-            content: message.content!,
+            content: message.normalizedContent!,
         }))
 }
 
@@ -126,6 +169,20 @@ function applyAgentEvent(
         const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
         if (call) call.result = event.toolResult.result
     }
+}
+
+async function persistAssistantMessage(
+    conversationId: string,
+    state: {reply: string; toolCalls: ToolCallRecord[]},
+): Promise<void> {
+    if (!state.reply && state.toolCalls.length === 0) return
+
+    await db.insert(messages).values({
+        conversationId,
+        role: 'assistant',
+        content: state.reply || null,
+        toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+    })
 }
 
 export const chatRoutes = new Elysia({prefix: '/chat'})
@@ -157,16 +214,15 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             })) {
                 applyAgentEvent(event, state)
                 if (event.type === 'error') {
-                    return apiError(502, 'AGENT_EXECUTION_FAILED', event.error?.message ?? 'Agent execution failed')
+                    throw createApiError(
+                        502,
+                        'AGENT_EXECUTION_FAILED',
+                        publicExecutionError(event.error),
+                    )
                 }
             }
 
-            await db.insert(messages).values({
-                conversationId: conversation.id,
-                role: 'assistant',
-                content: state.reply,
-                toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
-            })
+            await persistAssistantMessage(conversation.id, state)
 
             return {
                 success: true,
@@ -203,6 +259,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                     const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
                     let failed = false
                     const send = (data: unknown) => {
+                        if (request.signal.aborted) return
                         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
                     }
 
@@ -237,29 +294,29 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                                 send({
                                     type: 'error',
                                     code: 'AGENT_EXECUTION_FAILED',
-                                    message: event.error?.message ?? 'Agent execution failed',
+                                    message: publicExecutionError(event.error),
                                 })
                                 break
                             }
                         }
 
-                        if (state.reply || state.toolCalls.length > 0) {
-                            await db.insert(messages).values({
-                                conversationId: conversation.id,
-                                role: 'assistant',
-                                content: state.reply,
-                                toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+                        await persistAssistantMessage(conversation.id, state)
+                        if (!failed && !request.signal.aborted) {
+                            send({type: 'done', sessionId: conversation.sessionId})
+                        }
+                    } catch (error) {
+                        failed = true
+                        if (!request.signal.aborted) {
+                            send({
+                                type: 'error',
+                                code: 'STREAM_FAILED',
+                                message: env.isProduction
+                                    ? 'Streaming response failed'
+                                    : error instanceof Error ? error.message : String(error),
                             })
                         }
-                        if (!failed) send({type: 'done', sessionId: conversation.sessionId})
-                    } catch (error) {
-                        send({
-                            type: 'error',
-                            code: 'STREAM_FAILED',
-                            message: error instanceof Error ? error.message : String(error),
-                        })
                     } finally {
-                        controller.close()
+                        if (!request.signal.aborted) controller.close()
                     }
                 },
             })
@@ -281,10 +338,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
-            const [conversation] = await db.select().from(conversations).where(and(
-                eq(conversations.sessionId, params.sessionId),
-                eq(conversations.userId, user.sub),
-            )).limit(1)
+            const conversation = await findConversationBySession(user.sub, params.sessionId)
             if (!conversation) return apiError(404, 'NOT_FOUND', 'Session not found')
 
             const items = await db.select()
