@@ -2,11 +2,18 @@ import {createApiError} from '../api/errors/api-error.js'
 import {env} from '../config/env.js'
 import {LLMProviderError} from '../llm/domain/llm-provider.js'
 
+function normalizeError(error: unknown): Error {
+    if (error instanceof Error) return error
+    return new Error(error === undefined ? 'Agent execution failed without error details' : String(error))
+}
+
 function developmentMessage(error: Error, fallback: string): string {
     return env.isProduction ? fallback : error.message
 }
 
-export function toAgentExecutionApiError(error: Error) {
+export function toAgentExecutionApiError(errorInput: unknown) {
+    const error = normalizeError(errorInput)
+
     if (error instanceof LLMProviderError) {
         switch (error.code) {
             case 'ABORTED':
@@ -33,7 +40,7 @@ export function toAgentExecutionApiError(error: Error) {
     if (normalized.includes('max steps')) {
         return createApiError(422, 'AGENT_MAX_STEPS_EXCEEDED', developmentMessage(error, 'Agent exceeded its execution step limit'))
     }
-    if (normalized.includes('tool') || normalized.includes('model')) {
+    if (normalized.includes('tool') || normalized.includes('model') || normalized.includes('provider')) {
         return createApiError(502, 'AGENT_EXECUTION_FAILED', developmentMessage(error, 'Agent execution failed'))
     }
 
