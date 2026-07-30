@@ -3,7 +3,6 @@ import {
     streamText,
     type LanguageModel,
     type ModelMessage,
-    type TelemetryIntegration,
 } from 'ai'
 import type {
     LLMProvider,
@@ -42,7 +41,6 @@ function toTelemetry(settings?: LLMTelemetrySettings) {
         recordOutputs: settings.recordOutputs,
         functionId: settings.functionId,
         metadata: settings.metadata,
-        integrations: settings.integrations as TelemetryIntegration[] | undefined,
     }
 }
 
@@ -86,6 +84,7 @@ export class AISDKProviderAdapter implements LLMProvider {
 
     async generate(request: LLMRequest): Promise<LLMResponse> {
         const {instructions, messages, tools} = this.prepareRequest(request)
+        const telemetry = request.telemetry
         const result = await generateText({
             model: this.model,
             instructions: instructions || undefined,
@@ -94,7 +93,13 @@ export class AISDKProviderAdapter implements LLMProvider {
             temperature: request.temperature,
             maxOutputTokens: request.maxOutputTokens,
             abortSignal: request.abortSignal,
-            experimental_telemetry: toTelemetry(request.telemetry),
+            experimental_telemetry: toTelemetry(telemetry),
+            experimental_onStart: telemetry?.onStart,
+            experimental_onStepStart: telemetry?.onStepStart,
+            experimental_onToolCallStart: telemetry?.onToolCallStart,
+            experimental_onToolCallFinish: telemetry?.onToolCallFinish,
+            onStepFinish: telemetry?.onStepFinish,
+            onFinish: telemetry?.onFinish,
         })
 
         const toolCalls: LLMToolCall[] = result.toolCalls.map((toolCall) => ({
@@ -114,6 +119,7 @@ export class AISDKProviderAdapter implements LLMProvider {
 
     async *stream(request: LLMRequest): AsyncIterable<LLMStreamEvent> {
         const {instructions, messages, tools} = this.prepareRequest(request)
+        const telemetry = request.telemetry
         const result = streamText({
             model: this.model,
             instructions: instructions || undefined,
@@ -122,7 +128,13 @@ export class AISDKProviderAdapter implements LLMProvider {
             temperature: request.temperature,
             maxOutputTokens: request.maxOutputTokens,
             abortSignal: request.abortSignal,
-            experimental_telemetry: toTelemetry(request.telemetry),
+            experimental_telemetry: toTelemetry(telemetry),
+            experimental_onStart: telemetry?.onStart,
+            experimental_onStepStart: telemetry?.onStepStart,
+            experimental_onToolCallStart: telemetry?.onToolCallStart,
+            experimental_onToolCallFinish: telemetry?.onToolCallFinish,
+            onStepFinish: telemetry?.onStepFinish,
+            onFinish: telemetry?.onFinish,
         })
 
         try {
