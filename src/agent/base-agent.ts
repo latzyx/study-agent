@@ -47,6 +47,7 @@ export abstract class BaseAgent implements Agent {
                 messages,
                 tools,
                 abortSignal: options.abortSignal,
+                telemetry: options.trace?.telemetryForStep(step, model),
             })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
@@ -86,11 +87,20 @@ export abstract class BaseAgent implements Agent {
             }
 
             for (const toolCall of pendingToolCalls) {
+                const startedAt = performance.now()
+                options.trace?.toolStarted(step, toolCall)
+
                 try {
                     const result = await this.toolRegistry.execute(toolCall, {
                         ...options.toolContext,
                         abortSignal: options.abortSignal,
                     })
+                    options.trace?.toolFinished(
+                        step,
+                        toolCall,
+                        {success: true, result},
+                        Math.max(0, Math.round(performance.now() - startedAt)),
+                    )
                     yield {
                         type: 'tool-result',
                         toolResult: {
@@ -104,9 +114,16 @@ export abstract class BaseAgent implements Agent {
                         content: `Tool ${toolCall.name} result: ${JSON.stringify(result)}`,
                     })
                 } catch (error) {
+                    const normalizedError = error instanceof Error ? error : new Error(String(error))
+                    options.trace?.toolFinished(
+                        step,
+                        toolCall,
+                        {success: false, error: normalizedError},
+                        Math.max(0, Math.round(performance.now() - startedAt)),
+                    )
                     yield {
                         type: 'error',
-                        error: error instanceof Error ? error : new Error(String(error)),
+                        error: normalizedError,
                     }
                     return
                 }
