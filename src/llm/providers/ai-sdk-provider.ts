@@ -13,6 +13,10 @@ import type {
     LLMTelemetrySettings,
     LLMUsage,
 } from '../domain/llm-provider'
+import {
+    executeProviderRequest,
+    streamProviderRequest,
+} from '../resilience/provider-resilience.js'
 
 function toUsage(usage?: {
     inputTokens?: number
@@ -45,7 +49,12 @@ function toTelemetry(settings?: LLMTelemetrySettings) {
 }
 
 export class AISDKProviderAdapter implements LLMProvider {
-    constructor(private readonly model: LanguageModel) {}
+    private readonly resilienceKey: string
+
+    constructor(private readonly model: LanguageModel) {
+        const identity = model as unknown as {provider?: string; modelId?: string}
+        this.resilienceKey = `${identity.provider ?? 'unknown'}:${identity.modelId ?? 'unknown'}`
+    }
 
     private prepareRequest(request: LLMRequest) {
         let instructions = ''
@@ -85,101 +94,118 @@ export class AISDKProviderAdapter implements LLMProvider {
     async generate(request: LLMRequest): Promise<LLMResponse> {
         const {instructions, messages, tools} = this.prepareRequest(request)
         const telemetry = request.telemetry
-        const result = await generateText({
-            model: this.model,
-            instructions: instructions || undefined,
-            messages,
-            tools: Object.keys(tools).length > 0 ? tools : undefined,
-            temperature: request.temperature,
-            maxOutputTokens: request.maxOutputTokens,
-            abortSignal: request.abortSignal,
-            experimental_telemetry: toTelemetry(telemetry),
-            experimental_onStart: telemetry?.onStart,
-            experimental_onStepStart: telemetry?.onStepStart,
-            experimental_onToolCallStart: telemetry?.onToolCallStart,
-            experimental_onToolCallFinish: telemetry?.onToolCallFinish,
-            onStepFinish: telemetry?.onStepFinish,
-            onFinish: telemetry?.onFinish,
+
+        return executeProviderRequest({
+            key: this.resilienceKey,
+            parentSignal: request.abortSignal,
+            operation: async ({signal}) => {
+                const result = await generateText({
+                    model: this.model,
+                    instructions: instructions || undefined,
+                    messages,
+                    tools: Object.keys(tools).length > 0 ? tools : undefined,
+                    temperature: request.temperature,
+                    maxOutputTokens: request.maxOutputTokens,
+                    abortSignal: signal,
+                    experimental_telemetry: toTelemetry(telemetry),
+                    experimental_onStart: telemetry?.onStart,
+                    experimental_onStepStart: telemetry?.onStepStart,
+                    experimental_onToolCallStart: telemetry?.onToolCallStart,
+                    experimental_onToolCallFinish: telemetry?.onToolCallFinish,
+                    onStepFinish: telemetry?.onStepFinish,
+                    onFinish: telemetry?.onFinish,
+                })
+
+                const toolCalls: LLMToolCall[] = result.toolCalls.map((toolCall) => ({
+                    id: toolCall.toolCallId,
+                    name: toolCall.toolName,
+                    input: toolCall.input,
+                }))
+
+                return {
+                    text: result.text,
+                    toolCalls,
+                    finishReason: result.finishReason,
+                    usage: toUsage(result.usage),
+                    raw: result,
+                }
+            },
         })
-
-        const toolCalls: LLMToolCall[] = result.toolCalls.map((toolCall) => ({
-            id: toolCall.toolCallId,
-            name: toolCall.toolName,
-            input: toolCall.input,
-        }))
-
-        return {
-            text: result.text,
-            toolCalls,
-            finishReason: result.finishReason,
-            usage: toUsage(result.usage),
-            raw: result,
-        }
     }
 
     async *stream(request: LLMRequest): AsyncIterable<LLMStreamEvent> {
         const {instructions, messages, tools} = this.prepareRequest(request)
         const telemetry = request.telemetry
-        const result = streamText({
-            model: this.model,
-            instructions: instructions || undefined,
-            messages,
-            tools: Object.keys(tools).length > 0 ? tools : undefined,
-            temperature: request.temperature,
-            maxOutputTokens: request.maxOutputTokens,
-            abortSignal: request.abortSignal,
-            experimental_telemetry: toTelemetry(telemetry),
-            experimental_onStart: telemetry?.onStart,
-            experimental_onStepStart: telemetry?.onStepStart,
-            experimental_onToolCallStart: telemetry?.onToolCallStart,
-            experimental_onToolCallFinish: telemetry?.onToolCallFinish,
-            onStepFinish: telemetry?.onStepFinish,
-            onFinish: telemetry?.onFinish,
-        })
+
+        const attempt = ({signal}: {signal: AbortSignal}) => {
+            const self = this
+            return (async function *(): AsyncGenerator<LLMStreamEvent> {
+                const result = streamText({
+                    model: self.model,
+                    instructions: instructions || undefined,
+                    messages,
+                    tools: Object.keys(tools).length > 0 ? tools : undefined,
+                    temperature: request.temperature,
+                    maxOutputTokens: request.maxOutputTokens,
+                    abortSignal: signal,
+                    experimental_telemetry: toTelemetry(telemetry),
+                    experimental_onStart: telemetry?.onStart,
+                    experimental_onStepStart: telemetry?.onStepStart,
+                    experimental_onToolCallStart: telemetry?.onToolCallStart,
+                    experimental_onToolCallFinish: telemetry?.onToolCallFinish,
+                    onStepFinish: telemetry?.onStepFinish,
+                    onFinish: telemetry?.onFinish,
+                })
+
+                for await (const event of result.fullStream) {
+                    if (event.type === 'text-delta') {
+                        yield {type: 'text-delta', text: event.text}
+                    } else if (event.type === 'tool-call') {
+                        yield {
+                            type: 'tool-call',
+                            toolCall: {
+                                id: event.toolCallId,
+                                name: event.toolName,
+                                input: event.input,
+                            },
+                        }
+                    } else if (event.type === 'error') {
+                        throw toError(event.error)
+                    }
+                }
+
+                const [text, toolCalls, finishReason, usage] = await Promise.all([
+                    result.text,
+                    result.toolCalls,
+                    result.finishReason,
+                    result.usage,
+                ])
+                const normalizedToolCalls: LLMToolCall[] = toolCalls.map((toolCall) => ({
+                    id: toolCall.toolCallId,
+                    name: toolCall.toolName,
+                    input: toolCall.input,
+                }))
+                const normalizedUsage = toUsage(usage)
+
+                if (normalizedUsage) yield {type: 'usage', usage: normalizedUsage}
+                yield {
+                    type: 'finish',
+                    response: {
+                        text,
+                        toolCalls: normalizedToolCalls,
+                        finishReason,
+                        usage: normalizedUsage,
+                    },
+                }
+            })()
+        }
 
         try {
-            for await (const event of result.fullStream) {
-                if (event.type === 'text-delta') {
-                    yield {type: 'text-delta', text: event.text}
-                } else if (event.type === 'tool-call') {
-                    yield {
-                        type: 'tool-call',
-                        toolCall: {
-                            id: event.toolCallId,
-                            name: event.toolName,
-                            input: event.input,
-                        },
-                    }
-                } else if (event.type === 'error') {
-                    yield {type: 'error', error: toError(event.error)}
-                    return
-                }
-            }
-
-            const [text, toolCalls, finishReason, usage] = await Promise.all([
-                result.text,
-                result.toolCalls,
-                result.finishReason,
-                result.usage,
-            ])
-            const normalizedToolCalls: LLMToolCall[] = toolCalls.map((toolCall) => ({
-                id: toolCall.toolCallId,
-                name: toolCall.toolName,
-                input: toolCall.input,
-            }))
-            const normalizedUsage = toUsage(usage)
-
-            if (normalizedUsage) yield {type: 'usage', usage: normalizedUsage}
-
-            yield {
-                type: 'finish',
-                response: {
-                    text,
-                    toolCalls: normalizedToolCalls,
-                    finishReason,
-                    usage: normalizedUsage,
-                },
-            }
+            yield* streamProviderRequest({
+                key: this.resilienceKey,
+                parentSignal: request.abortSignal,
+                operation: attempt,
+            })
         } catch (error) {
             yield {type: 'error', error: toError(error)}
         }
