@@ -2,6 +2,7 @@ import {Elysia, t} from 'elysia'
 import {and, desc, eq, gte, lte, sql, type SQL} from 'drizzle-orm'
 import {db} from '../../db/index.js'
 import {auditLogs, operationLogs} from '../../db/schema.js'
+import {createApiError} from '../errors/api-error.js'
 import {
     authenticateAccessToken,
     authPlugin,
@@ -17,14 +18,36 @@ const logQuery = t.Object({
     action: t.Optional(t.String({maxLength: 50})),
     method: t.Optional(t.String({maxLength: 10})),
     path: t.Optional(t.String({maxLength: 255})),
+    requestId: t.Optional(t.String({maxLength: 100})),
+    statusCode: t.Optional(t.Number({minimum: 100, maximum: 599})),
     startDate: t.Optional(t.String()),
     endDate: t.Optional(t.String()),
 })
 
-function parseDate(value?: string): Date | null {
+function parseOptionalDate(value: string | undefined, field: string): Date | null {
     if (!value) return null
+
     const date = new Date(value)
-    return Number.isNaN(date.getTime()) ? null : date
+    if (Number.isNaN(date.getTime())) {
+        throw createApiError(400, 'INVALID_DATE_FILTER', `${field} must be a valid date`)
+    }
+
+    return date
+}
+
+function resolveDateRange(startValue?: string, endValue?: string) {
+    const startDate = parseOptionalDate(startValue, 'startDate')
+    const endDate = parseOptionalDate(endValue, 'endDate')
+
+    if (startDate && endDate && startDate > endDate) {
+        throw createApiError(
+            400,
+            'INVALID_DATE_RANGE',
+            'startDate must be earlier than or equal to endDate',
+        )
+    }
+
+    return {startDate, endDate}
 }
 
 async function requireAdmin(JWT: any, authorization?: string) {
@@ -46,8 +69,7 @@ export const adminRoutes = new Elysia({prefix: '/admin'})
             const pageSize = query.pageSize ?? 20
             const offset = (page - 1) * pageSize
             const conditions: SQL[] = []
-            const startDate = parseDate(query.startDate)
-            const endDate = parseDate(query.endDate)
+            const {startDate, endDate} = resolveDateRange(query.startDate, query.endDate)
 
             if (query.userId) conditions.push(eq(auditLogs.userId, query.userId))
             if (query.action) conditions.push(eq(auditLogs.action, query.action))
@@ -88,12 +110,13 @@ export const adminRoutes = new Elysia({prefix: '/admin'})
             const pageSize = query.pageSize ?? 20
             const offset = (page - 1) * pageSize
             const conditions: SQL[] = []
-            const startDate = parseDate(query.startDate)
-            const endDate = parseDate(query.endDate)
+            const {startDate, endDate} = resolveDateRange(query.startDate, query.endDate)
 
             if (query.userId) conditions.push(eq(operationLogs.userId, query.userId))
-            if (query.method) conditions.push(eq(operationLogs.method, query.method))
+            if (query.method) conditions.push(eq(operationLogs.method, query.method.toUpperCase()))
             if (query.path) conditions.push(eq(operationLogs.path, query.path))
+            if (query.requestId) conditions.push(eq(operationLogs.requestId, query.requestId))
+            if (query.statusCode) conditions.push(eq(operationLogs.statusCode, query.statusCode))
             if (startDate) conditions.push(gte(operationLogs.createdAt, startDate))
             if (endDate) conditions.push(lte(operationLogs.createdAt, endDate))
             const where = conditions.length > 0 ? and(...conditions) : undefined
@@ -112,8 +135,9 @@ export const adminRoutes = new Elysia({prefix: '/admin'})
                 success: true,
                 data: items.map((item) => ({
                     ...item,
-                    statusCode: item.statusCode ?? undefined,
-                    durationMs: item.durationMs ?? undefined,
+                    userId: item.userId ?? undefined,
+                    ipAddress: item.ipAddress ?? undefined,
+                    userAgent: item.userAgent ?? undefined,
                     createdAt: item.createdAt.toISOString(),
                 })),
                 pagination: {page, pageSize, total: countResult?.count ?? 0},
