@@ -1,7 +1,52 @@
 import type {Agent, AgentConfig, AgentEvent, AgentRunOptions} from './types/agent'
-import type {LLMProvider, LLMToolCall, LLMUsage} from '../llm/domain/llm-provider'
+import type {
+    LLMMessage,
+    LLMProvider,
+    LLMToolCall,
+    LLMUsage,
+} from '../llm/domain/llm-provider'
 import type {Tool} from '../tools/domain/tool'
 import type {ToolRegistry} from '../tools/registry/tool-registry'
+
+const DEFAULT_MAX_STEPS = 5
+const DEFAULT_MAX_HISTORY_MESSAGES = 50
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 20_000
+
+function normalizePositiveInteger(value: number | undefined, fallback: number, name: string): number {
+    if (value === undefined) return fallback
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer`)
+    }
+
+    return value
+}
+
+function serializeToolResult(result: unknown, maxChars: number): string {
+    const seen = new WeakSet<object>()
+    let serialized: string
+
+    try {
+        serialized = JSON.stringify(result, (_key, value: unknown) => {
+            if (typeof value === 'bigint') return value.toString()
+            if (typeof value !== 'object' || value === null) return value
+            if (seen.has(value)) return '[Circular]'
+            seen.add(value)
+            return value
+        })
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        serialized = JSON.stringify({error: 'TOOL_RESULT_SERIALIZATION_FAILED', message})
+    }
+
+    if (serialized === undefined) serialized = JSON.stringify(null)
+    if (serialized.length <= maxChars) return serialized
+
+    return JSON.stringify({
+        truncated: true,
+        originalChars: serialized.length,
+        content: serialized.slice(0, maxChars),
+    })
+}
 
 export abstract class BaseAgent implements Agent {
     private toolsRegistered = false
@@ -44,17 +89,45 @@ export abstract class BaseAgent implements Agent {
             return
         }
 
-        const messages = [
-            {role: 'system' as const, content: this.config.systemPrompt},
-            ...(options.history ?? []).filter((message) => message.role !== 'system'),
-            {role: 'user' as const, content: normalizedInput},
+        if (options.abortSignal?.aborted) {
+            yield {type: 'error', error: new Error('Agent run was aborted before execution')}
+            return
+        }
+
+        let maxSteps: number
+        let maxHistoryMessages: number
+        let maxToolResultChars: number
+
+        try {
+            maxSteps = normalizePositiveInteger(this.config.maxSteps, DEFAULT_MAX_STEPS, 'maxSteps')
+            maxHistoryMessages = normalizePositiveInteger(
+                this.config.maxHistoryMessages,
+                DEFAULT_MAX_HISTORY_MESSAGES,
+                'maxHistoryMessages',
+            )
+            maxToolResultChars = normalizePositiveInteger(
+                this.config.maxToolResultChars,
+                DEFAULT_MAX_TOOL_RESULT_CHARS,
+                'maxToolResultChars',
+            )
+        } catch (error) {
+            yield {type: 'error', error: error instanceof Error ? error : new Error(String(error))}
+            return
+        }
+
+        const history = (options.history ?? [])
+            .filter((message) => message.role !== 'system')
+            .slice(-maxHistoryMessages)
+        const messages: LLMMessage[] = [
+            {role: 'system', content: this.config.systemPrompt},
+            ...history,
+            {role: 'user', content: normalizedInput},
         ]
         const tools = [...agentTools.values()].map((tool) => ({
             name: tool.name,
             description: tool.description,
             inputSchema: tool.inputSchema,
         }))
-        const maxSteps = this.config.maxSteps ?? 5
         const model = this.config.modelId ?? this.config.modelProfile
 
         for (let step = 1; step <= maxSteps; step++) {
@@ -67,6 +140,7 @@ export abstract class BaseAgent implements Agent {
                 messages,
                 tools,
                 abortSignal: options.abortSignal,
+                timeoutMs: this.config.llmTimeoutMs,
             })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
@@ -116,6 +190,11 @@ export abstract class BaseAgent implements Agent {
             })
 
             for (const toolCall of pendingToolCalls) {
+                if (options.abortSignal?.aborted) {
+                    yield {type: 'error', error: new Error('Agent run was aborted before tool execution')}
+                    return
+                }
+
                 try {
                     const result = await this.toolRegistry.execute(toolCall, {
                         ...options.toolContext,
@@ -133,7 +212,7 @@ export abstract class BaseAgent implements Agent {
                         role: 'tool',
                         name: toolCall.name,
                         toolCallId: toolCall.id,
-                        content: JSON.stringify(result),
+                        content: serializeToolResult(result, maxToolResultChars),
                     })
                 } catch (error) {
                     yield {
