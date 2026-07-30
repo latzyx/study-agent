@@ -22,14 +22,14 @@ export class ToolRegistry {
         const tools = this.getScope(scope)
         const existing = tools.get(tool.name)
         if (existing === tool) return
-        if (existing) throw new Error(`Tool already registered in scope: ${tool.name}`)
+        if (existing) throw new Error(`Tool already registered: ${tool.name}`)
 
         tools.set(tool.name, tool)
     }
 
     get(name: string, scope: ToolScope = GLOBAL_TOOL_SCOPE): Tool {
         const tool = this.getScope(scope).get(name)
-        if (!tool) throw new Error(`Unknown tool in scope: ${name}`)
+        if (!tool) throw new Error(`Unknown tool: ${name}`)
 
         return tool
     }
