@@ -32,8 +32,8 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .use(authPlugin)
     .get(
         '/',
-        async ({JWT, cookie: {auth}, headers, query}) => {
-            const user = await authenticateAccessToken(JWT, auth, headers.authorization)
+        async ({JWT, headers, query}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const page = query.page ?? 1
@@ -64,8 +64,8 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .post(
         '/',
-        async ({body, JWT, cookie: {auth}, headers}) => {
-            const user = await authenticateAccessToken(JWT, auth, headers.authorization)
+        async ({body, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const [newAgent] = await db.insert(agents).values({
@@ -94,8 +94,8 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .get(
         '/:id',
-        async ({params, JWT, cookie: {auth}, headers}) => {
-            const user = await authenticateAccessToken(JWT, auth, headers.authorization)
+        async ({params, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const [agent] = await db.select().from(agents).where(and(
@@ -113,8 +113,8 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .put(
         '/:id',
-        async ({params, body, JWT, cookie: {auth}, headers}) => {
-            const user = await authenticateAccessToken(JWT, auth, headers.authorization)
+        async ({params, body, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const updateData: Partial<typeof agents.$inferInsert> = {updatedAt: new Date()}
@@ -141,8 +141,8 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .delete(
         '/:id',
-        async ({params, JWT, cookie: {auth}, headers}) => {
-            const user = await authenticateAccessToken(JWT, auth, headers.authorization)
+        async ({params, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const [deleted] = await db.delete(agents)
