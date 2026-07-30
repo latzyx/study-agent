@@ -1,62 +1,115 @@
 import {Elysia, t} from 'elysia'
-import {eq} from 'drizzle-orm'
+import {and, eq} from 'drizzle-orm'
+import {unlink} from 'node:fs/promises'
+import * as path from 'node:path'
 import {db} from '../../db/index.js'
 import {files} from '../../db/schema.js'
-import {authPlugin} from '../middleware/auth.js'
-import * as fs from 'fs'
-import * as path from 'path'
+import {
+    authenticateAccessToken,
+    authPlugin,
+    unauthorizedResponse,
+} from '../middleware/auth.js'
 
-const UPLOAD_DIR = path.resolve('uploads')
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, {recursive: true})
+const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR ?? 'uploads')
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024)
 
-async function requireUser(JWT: any, auth: any) {
-    if (!auth?.value) throw new Error('Unauthorized')
-    const payload = await JWT.verify(auth.value)
-    if (!payload) throw new Error('Unauthorized')
-    return payload as {sub: string; username: string}
+function apiError(status: number, code: string, message: string): Response {
+    return Response.json({success: false, error: {code, message}}, {status})
+}
+
+function serializeFile(file: typeof files.$inferSelect) {
+    return {
+        id: file.id,
+        filename: file.filename,
+        mimeType: file.mimeType ?? undefined,
+        size: Number(file.size ?? 0),
+        createdAt: file.createdAt.toISOString(),
+    }
+}
+
+async function findOwnedFile(userId: string, fileId: string) {
+    const [file] = await db.select().from(files).where(and(
+        eq(files.id, fileId),
+        eq(files.userId, userId),
+    )).limit(1)
+
+    return file
 }
 
 export const fileRoutes = new Elysia({prefix: '/files'})
     .use(authPlugin)
     .post(
         '/upload',
-        // @ts-ignore
-        async ({JWT, cookie: {auth}, body}) => {
-            const user = await requireUser(JWT, auth)
+        async ({JWT, headers, body}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
+
             const file = body.file
-            if (!file) return new Response(JSON.stringify({success: false, error: {code: 'NO_FILE', message: 'No file provided'}}), {status: 400, headers: {'Content-Type': 'application/json'}})
+            if (!file) return apiError(400, 'NO_FILE', 'No file provided')
+            if (file.size > MAX_UPLOAD_BYTES) {
+                return apiError(413, 'FILE_TOO_LARGE', `File exceeds ${MAX_UPLOAD_BYTES} bytes`)
+            }
 
-            const ext = path.extname(file.name)
-            const storageName = `${crypto.randomUUID()}${ext}`
+            const extension = path.extname(file.name).toLowerCase().slice(0, 20)
+            const storageName = `${crypto.randomUUID()}${extension}`
             const storagePath = path.join(UPLOAD_DIR, storageName)
-            const arrayBuffer = await file.arrayBuffer()
-            fs.writeFileSync(storagePath, Buffer.from(arrayBuffer))
 
-            const [saved] = await db.insert(files).values({userId: user.sub, filename: file.name, storagePath, mimeType: file.type, size: file.size}).returning()
-            return {success: true, data: {id: saved!.id, filename: saved!.filename, mimeType: saved!.mimeType ?? undefined, size: Number(saved!.size), createdAt: saved!.createdAt.toISOString()}}
+            await Bun.write(storagePath, file)
+
+            try {
+                const [saved] = await db.insert(files).values({
+                    userId: user.sub,
+                    filename: file.name,
+                    storagePath,
+                    mimeType: file.type,
+                    size: file.size,
+                }).returning()
+
+                if (!saved) throw new Error('Failed to save file metadata')
+                return {success: true, data: serializeFile(saved)}
+            } catch (error) {
+                await unlink(storagePath).catch(() => undefined)
+                throw error
+            }
         },
-        {body: t.Object({file: t.File()}), detail: {summary: 'Upload a file', security: [{BearerAuth: []}]}},
+        {
+            body: t.Object({file: t.File()}),
+            detail: {summary: 'Upload a file', security: [{BearerAuth: []}]},
+        },
     )
     .get(
         '/:id',
-        async ({params}) => {
-            const [file] = await db.select().from(files).where(eq(files.id, params.id)).limit(1)
-            if (!file) return new Response(JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'File not found'}}), {status: 404, headers: {'Content-Type': 'application/json'}})
-            return {success: true, data: {id: file.id, filename: file.filename, mimeType: file.mimeType ?? undefined, size: Number(file.size), createdAt: file.createdAt.toISOString()}}
+        async ({params, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
+
+            const file = await findOwnedFile(user.sub, params.id)
+            if (!file) return apiError(404, 'NOT_FOUND', 'File not found')
+            return {success: true, data: serializeFile(file)}
         },
-        {params: t.Object({id: t.String()}), detail: {summary: 'Get file info'}},
+        {
+            params: t.Object({id: t.String({format: 'uuid'})}),
+            detail: {summary: 'Get file info', security: [{BearerAuth: []}]},
+        },
     )
     .delete(
         '/:id',
-        // @ts-ignore
-        async ({params, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [file] = await db.select().from(files).where(eq(files.id, params.id)).limit(1)
-            if (!file) return new Response(JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'File not found'}}), {status: 404, headers: {'Content-Type': 'application/json'}})
-            if (file.userId !== user.sub) return new Response(JSON.stringify({success: false, error: {code: 'FORBIDDEN', message: 'Not the owner'}}), {status: 403, headers: {'Content-Type': 'application/json'}})
-            if (fs.existsSync(file.storagePath)) fs.unlinkSync(file.storagePath)
-            await db.delete(files).where(eq(files.id, params.id))
+        async ({params, JWT, headers}) => {
+            const user = await authenticateAccessToken(JWT, headers.authorization)
+            if (!user) return unauthorizedResponse()
+
+            const file = await findOwnedFile(user.sub, params.id)
+            if (!file) return apiError(404, 'NOT_FOUND', 'File not found')
+
+            await db.delete(files).where(and(eq(files.id, file.id), eq(files.userId, user.sub)))
+            await unlink(file.storagePath).catch((error: NodeJS.ErrnoException) => {
+                if (error.code !== 'ENOENT') throw error
+            })
+
             return {success: true}
         },
-        {params: t.Object({id: t.String()}), detail: {summary: 'Delete a file', security: [{BearerAuth: []}]}},
+        {
+            params: t.Object({id: t.String({format: 'uuid'})}),
+            detail: {summary: 'Delete a file', security: [{BearerAuth: []}]},
+        },
     )
