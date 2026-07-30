@@ -43,6 +43,22 @@ export const users = pgTable('users', {
     updatedAt: updatedAt(),
 })
 
+export const refreshTokens = pgTable('refresh_tokens', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+        .references(() => users.id, {onDelete: 'cascade'})
+        .notNull(),
+    tokenHash: varchar('token_hash', {length: 64}).notNull().unique(),
+    expiresAt: timestamp('expires_at', {withTimezone: true}).notNull(),
+    revokedAt: timestamp('revoked_at', {withTimezone: true}),
+    createdAt: createdAt(),
+}, (table) => [
+    index('refresh_tokens_user_expires_at_idx').on(table.userId, table.expiresAt),
+    index('refresh_tokens_active_idx')
+        .on(table.userId, table.expiresAt)
+        .where(sql`${table.revokedAt} is null`),
+])
+
 export const agents = pgTable('agents', {
     id: uuid('id').defaultRandom().primaryKey(),
     name: varchar('name', {length: 100}).notNull(),
