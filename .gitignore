@@ -35,6 +35,3 @@ uploads
 
 # Finder (MacOS) folder config
 .DS_Store
-
-# model-doc
-docs
