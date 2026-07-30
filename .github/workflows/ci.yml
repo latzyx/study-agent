@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  typecheck:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,3 +27,6 @@ jobs:
 
       - name: TypeScript check
         run: bun run typecheck
+
+      - name: Unit tests
+        run: bun test
