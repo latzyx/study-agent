@@ -36,6 +36,12 @@ const rawEnvSchema = z.object({
     DB_SHUTDOWN_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(60).default(5),
     HEALTHCHECK_DB_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(1500),
 
+    AI_TRACE_ENABLED: booleanEnv.default(true),
+    AI_TRACE_RECORD_INPUTS: booleanEnv.optional(),
+    AI_TRACE_RECORD_OUTPUTS: booleanEnv.optional(),
+    AI_TRACE_MAX_SNAPSHOT_CHARS: z.coerce.number().int().min(1000).max(1_000_000).default(20_000),
+    AI_TRACE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+
     UPLOAD_DIR: z.string().trim().min(1).default('uploads'),
     MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
 
@@ -84,6 +90,7 @@ function parseEnvironment(source: NodeJS.ProcessEnv): RawEnv {
 
 const raw = parseEnvironment(process.env)
 const developmentJwtSecret = 'study-agent-development-secret-change-me'
+const recordTracePayloadsByDefault = raw.NODE_ENV !== 'production'
 
 export const env = Object.freeze({
     nodeEnv: raw.NODE_ENV,
@@ -132,6 +139,13 @@ export const env = Object.freeze({
         connectTimeoutSeconds: raw.DB_CONNECT_TIMEOUT_SECONDS,
         shutdownTimeoutSeconds: raw.DB_SHUTDOWN_TIMEOUT_SECONDS,
         healthcheckTimeoutMs: raw.HEALTHCHECK_DB_TIMEOUT_MS,
+    },
+    tracing: {
+        enabled: raw.AI_TRACE_ENABLED,
+        recordInputs: raw.AI_TRACE_RECORD_INPUTS ?? recordTracePayloadsByDefault,
+        recordOutputs: raw.AI_TRACE_RECORD_OUTPUTS ?? recordTracePayloadsByDefault,
+        maxSnapshotChars: raw.AI_TRACE_MAX_SNAPSHOT_CHARS,
+        retentionDays: raw.AI_TRACE_RETENTION_DAYS,
     },
     uploads: {
         directory: raw.UPLOAD_DIR,
