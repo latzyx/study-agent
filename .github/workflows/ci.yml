@@ -30,3 +30,6 @@ jobs:
 
       - name: Unit tests
         run: bun test
+
+      - name: Production build
+        run: bun run build
