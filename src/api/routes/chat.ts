@@ -12,6 +12,7 @@ import {
 } from '../../services/ai-trace-service.js'
 import {enforceChatRateLimit} from '../../services/request-guard-service.js'
 import {authPlugin, requireAccessToken} from '../middleware/auth.js'
+import {getRequestId} from '../middleware/request-context.js'
 import {chatBody, chatStreamBody} from '../schemas/chat.js'
 
 const traceListQuery = t.Object({
@@ -50,7 +51,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     .use(authPlugin)
     .post(
         '/',
-        async ({body, JWT, headers, request, requestId}) => {
+        async ({body, JWT, headers, request}) => {
             const user = await requireAccessToken(JWT, headers.authorization)
             enforceChatRateLimit(user.sub)
 
@@ -59,7 +60,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                 agentId: body.agentId,
                 message: body.message,
                 sessionId: body.sessionId,
-                requestId,
+                requestId: getRequestId(request),
                 abortSignal: request.signal,
             })
 
@@ -69,9 +70,10 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     )
     .post(
         '/stream',
-        async ({body, JWT, headers, request, requestId}) => {
+        async ({body, JWT, headers, request}) => {
             const user = await requireAccessToken(JWT, headers.authorization)
             enforceChatRateLimit(user.sub)
+            const requestId = getRequestId(request)
 
             const encoder = new TextEncoder()
             const stream = new ReadableStream({
