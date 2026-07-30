@@ -7,11 +7,7 @@ import {
     streamChat,
 } from '../../services/chat-service.js'
 import {enforceChatRateLimit} from '../../services/request-guard-service.js'
-import {
-    authenticateAccessToken,
-    authPlugin,
-    unauthorizedResponse,
-} from '../middleware/auth.js'
+import {authPlugin, requireAccessToken} from '../middleware/auth.js'
 import {chatBody, chatStreamBody} from '../schemas/chat.js'
 
 function streamErrorPayload(error: unknown) {
@@ -38,8 +34,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     .post(
         '/',
         async ({body, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
+            const user = await requireAccessToken(JWT, headers.authorization)
             enforceChatRateLimit(user.sub)
 
             const result = await executeChat({
@@ -57,8 +52,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     .post(
         '/stream',
         async ({body, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
+            const user = await requireAccessToken(JWT, headers.authorization)
             enforceChatRateLimit(user.sub)
 
             const encoder = new TextEncoder()
@@ -101,9 +95,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
     .get(
         '/history/:sessionId',
         async ({params, JWT, headers}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             return {
                 success: true,
                 data: await getChatHistory(user.sub, params.sessionId),
