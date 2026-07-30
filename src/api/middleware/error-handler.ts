@@ -16,15 +16,23 @@ function jsonError(
     )
 }
 
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
 export const errorHandlerPlugin = new Elysia({name: 'error-handler'})
     .use(requestContextPlugin)
     .onError({as: 'global'}, ({code, error, request, requestId}) => {
+        const resolvedRequestId = requestId
+            ?? request.headers.get('x-request-id')
+            ?? crypto.randomUUID()
+
         if (error instanceof ApiError) {
             return jsonError(
                 error.status,
                 error.code,
                 error.message,
-                requestId,
+                resolvedRequestId,
                 error.details,
             )
         }
@@ -34,21 +42,26 @@ export const errorHandlerPlugin = new Elysia({name: 'error-handler'})
                 422,
                 'VALIDATION_ERROR',
                 'Request validation failed',
-                requestId,
-                env.isProduction ? undefined : {reason: error.message},
+                resolvedRequestId,
+                env.isProduction ? undefined : {reason: errorMessage(error)},
             )
         }
 
         if (code === 'PARSE') {
-            return jsonError(400, 'INVALID_REQUEST_BODY', 'Unable to parse request body', requestId)
+            return jsonError(
+                400,
+                'INVALID_REQUEST_BODY',
+                'Unable to parse request body',
+                resolvedRequestId,
+            )
         }
 
         if (code === 'NOT_FOUND') {
-            return jsonError(404, 'ROUTE_NOT_FOUND', 'Route not found', requestId)
+            return jsonError(404, 'ROUTE_NOT_FOUND', 'Route not found', resolvedRequestId)
         }
 
         console.error('[api:error]', {
-            requestId,
+            requestId: resolvedRequestId,
             method: request.method,
             path: new URL(request.url).pathname,
             error,
@@ -57,7 +70,7 @@ export const errorHandlerPlugin = new Elysia({name: 'error-handler'})
         return jsonError(
             500,
             'INTERNAL_SERVER_ERROR',
-            env.isProduction ? 'Internal server error' : error.message,
-            requestId,
+            env.isProduction ? 'Internal server error' : errorMessage(error),
+            resolvedRequestId,
         )
     })
