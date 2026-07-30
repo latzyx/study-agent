@@ -1,5 +1,10 @@
 import {describe, expect, test} from 'bun:test'
-import {authenticateAccessToken, hasAdminAccess} from '../src/api/middleware/auth.js'
+import {
+    authenticateAccessToken,
+    hasAdminAccess,
+    requireAccessToken,
+    requireAdminAccess,
+} from '../src/api/middleware/auth.js'
 
 class FakeJwtVerifier {
     constructor(private readonly payload: Record<string, unknown> | false) {}
@@ -35,6 +40,24 @@ describe('authenticateAccessToken', () => {
         )
 
         expect(payload).toBeNull()
+    })
+})
+
+describe('access guards', () => {
+    test('throws a structured 401 for missing authentication', async () => {
+        await expect(requireAccessToken(new FakeJwtVerifier(false)))
+            .rejects.toMatchObject({status: 401, code: 'UNAUTHORIZED'})
+    })
+
+    test('throws a structured 403 for non-admin users', async () => {
+        const verifier = new FakeJwtVerifier({
+            sub: 'unknown-user',
+            username: 'unknown',
+            type: 'access',
+        })
+
+        await expect(requireAdminAccess(verifier, 'Bearer valid-token'))
+            .rejects.toMatchObject({status: 403, code: 'FORBIDDEN'})
     })
 })
 
