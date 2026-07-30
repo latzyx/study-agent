@@ -16,6 +16,8 @@ import type {
 } from '../domain/llm-provider'
 import {LLMProviderError} from '../domain/llm-provider'
 
+export type LanguageModelResolver = (modelId: string) => LanguageModel
+
 function toUsage(usage?: {
     inputTokens?: number
     outputTokens?: number
@@ -221,8 +223,30 @@ function normalizeToolCalls(toolCalls: ReadonlyArray<{
     }))
 }
 
+export function normalizeRequestedModelId(modelId: string): string {
+    const normalized = modelId.trim()
+    if (!normalized) {
+        throw new LLMProviderError('LLM request model cannot be empty', 'INVALID_REQUEST', false)
+    }
+    return normalized
+}
+
 export class AISDKProviderAdapter implements LLMProvider {
-    constructor(private readonly model: LanguageModel) {}
+    constructor(private readonly resolveModel: LanguageModelResolver) {}
+
+    private modelFor(request: LLMRequest): LanguageModel {
+        const modelId = normalizeRequestedModelId(request.model)
+        try {
+            return this.resolveModel(modelId)
+        } catch (error) {
+            throw new LLMProviderError(
+                `Unable to resolve requested LLM model: ${modelId}`,
+                'INVALID_REQUEST',
+                false,
+                {cause: error},
+            )
+        }
+    }
 
     async generate(request: LLMRequest): Promise<LLMResponse> {
         const {instructions, messages} = toModelMessages(request)
@@ -231,7 +255,7 @@ export class AISDKProviderAdapter implements LLMProvider {
 
         try {
             const result = await generateText({
-                model: this.model,
+                model: this.modelFor(request),
                 instructions,
                 messages,
                 tools,
@@ -241,6 +265,7 @@ export class AISDKProviderAdapter implements LLMProvider {
             })
 
             return {
+                model: normalizeRequestedModelId(request.model),
                 text: result.text,
                 toolCalls: normalizeToolCalls(result.toolCalls),
                 finishReason: result.finishReason,
@@ -260,8 +285,9 @@ export class AISDKProviderAdapter implements LLMProvider {
         try {
             const {instructions, messages} = toModelMessages(request)
             const tools = createTools(request)
+            const requestedModel = normalizeRequestedModelId(request.model)
             const result = streamText({
-                model: this.model,
+                model: this.modelFor(request),
                 instructions,
                 messages,
                 tools,
@@ -304,6 +330,7 @@ export class AISDKProviderAdapter implements LLMProvider {
             yield {
                 type: 'finish',
                 response: {
+                    model: requestedModel,
                     text,
                     toolCalls: normalizeToolCalls(toolCalls),
                     finishReason,
