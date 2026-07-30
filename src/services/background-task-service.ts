@@ -58,8 +58,7 @@ export async function drainBackgroundTasks(
         await Promise.race([
             Promise.allSettled(tasks),
             new Promise<void>((resolve) => {
-                const timer = setTimeout(resolve, Math.min(remainingMs, 100))
-                timer.unref?.()
+                setTimeout(resolve, Math.min(remainingMs, 100))
             }),
         ])
     }
