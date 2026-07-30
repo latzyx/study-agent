@@ -2,6 +2,7 @@ import {and, asc, desc, eq} from 'drizzle-orm'
 import {BaseAgent} from '../agent/base-agent.js'
 import type {AgentConfig, AgentEvent} from '../agent/types/agent.js'
 import {createApiError} from '../api/errors/api-error.js'
+import {inferAgentKeyFromTools, resolveAgentTools} from '../agents/catalog.js'
 import {env} from '../config/env.js'
 import {db} from '../db/index.js'
 import {agents, conversations, messages} from '../db/schema.js'
@@ -9,9 +10,13 @@ import type {LLMMessage, LLMUsage} from '../llm/domain/llm-provider.js'
 import {AISDKProviderAdapter} from '../llm/providers/ai-sdk-provider.js'
 import {resolveModel} from '../llm/registry/model-registry.js'
 import {resolveLanguageModel} from '../llm/registry/provider-registry.js'
-import {resolveBuiltinTools} from '../tools/builtin/index.js'
 import {ToolRegistry} from '../tools/registry/tool-registry.js'
 import {findUserAgent} from './agent-service.js'
+import {
+    buildTurnMessageRows,
+    restoreLLMMessages,
+    type PersistedToolCall,
+} from './chat-message-mapper.js'
 import {acquireChatExecutionLease, type ConcurrencyLease} from './chat-concurrency-service.js'
 
 const HISTORY_MESSAGE_LIMIT = 50
@@ -24,12 +29,7 @@ export interface ChatInput {
     abortSignal?: AbortSignal
 }
 
-export interface ToolCallRecord {
-    id: string
-    name: string
-    args: unknown
-    result: unknown
-}
+export interface ToolCallRecord extends PersistedToolCall {}
 
 export interface ChatResult {
     reply: string
@@ -58,7 +58,20 @@ function publicExecutionError(error?: Error): string {
 }
 
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
-    const selectedTools = resolveBuiltinTools(agentRow.tools)
+    let selectedTools
+    try {
+        const agentKey = inferAgentKeyFromTools(agentRow.tools)
+        selectedTools = resolveAgentTools(agentKey, agentRow.tools)
+    } catch (error) {
+        throw createApiError(
+            500,
+            'INVALID_AGENT_TOOL_CONFIGURATION',
+            env.isProduction
+                ? 'Agent tool configuration is invalid'
+                : error instanceof Error ? error.message : 'Agent tool configuration is invalid',
+        )
+    }
+
     const modelId = resolveModel(agentRow.modelProfile)
     const config: AgentConfig = {
         name: agentRow.name,
@@ -67,13 +80,10 @@ function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent 
         modelProfile: agentRow.modelProfile,
         modelId,
         maxSteps: agentRow.maxSteps,
+        tools: selectedTools,
     }
 
-    return new (class extends BaseAgent {
-        getTools() {
-            return selectedTools
-        }
-    })(config, new AISDKProviderAdapter(resolveLanguageModel), new ToolRegistry())
+    return new BaseAgent(config, new AISDKProviderAdapter(resolveLanguageModel), new ToolRegistry())
 }
 
 async function findConversationBySession(userId: string, sessionId: string) {
@@ -122,16 +132,6 @@ async function getOrCreateConversation(userId: string, agentId: string, sessionI
     return ensureConversationAgent(concurrent, agentId)
 }
 
-function historyContent(message: {
-    content: string | null
-    toolCalls: unknown
-}): string | null {
-    const parts: string[] = []
-    if (message.content?.trim()) parts.push(message.content)
-    if (message.toolCalls) parts.push(`Tool activity: ${JSON.stringify(message.toolCalls)}`)
-    return parts.length > 0 ? parts.join('\n') : null
-}
-
 async function loadConversationHistory(conversationId: string): Promise<LLMMessage[]> {
     const recentMessages = await db.select({
         role: messages.role,
@@ -143,14 +143,7 @@ async function loadConversationHistory(conversationId: string): Promise<LLMMessa
         .orderBy(desc(messages.createdAt))
         .limit(HISTORY_MESSAGE_LIMIT)
 
-    return recentMessages
-        .reverse()
-        .map((message) => ({...message, normalizedContent: historyContent(message)}))
-        .filter((message) => message.normalizedContent !== null)
-        .map((message) => ({
-            role: message.role,
-            content: message.normalizedContent!,
-        }))
+    return restoreLLMMessages(recentMessages.reverse())
 }
 
 function applyAgentEvent(
@@ -174,25 +167,39 @@ function applyAgentEvent(
 
     if (event.type === 'tool-result' && event.toolResult) {
         const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
-        if (call) call.result = event.toolResult.result
+        if (!call) {
+            throw new Error(`Tool result has no matching call: ${event.toolResult.toolCallId}`)
+        }
+        call.result = event.toolResult.result
     }
 }
 
-async function persistAssistantMessage(
+async function persistConversationTurn(
     conversationId: string,
+    userMessage: string,
     state: {reply: string; toolCalls: ToolCallRecord[]},
 ): Promise<void> {
-    if (!state.reply && state.toolCalls.length === 0) return
-
-    await db.insert(messages).values({
+    const rows = buildTurnMessageRows(
         conversationId,
-        role: 'assistant',
-        content: state.reply || null,
-        toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+        userMessage,
+        state.reply,
+        state.toolCalls,
+    )
+
+    await db.transaction(async (tx) => {
+        await tx.insert(messages).values(rows)
     })
 }
 
 async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
+    const normalizedMessage = input.message.trim()
+    if (!normalizedMessage) {
+        throw createApiError(400, 'EMPTY_MESSAGE', 'Message cannot be empty')
+    }
+    if (input.abortSignal?.aborted) {
+        throw createApiError(499, 'REQUEST_ABORTED', 'Request was aborted before execution')
+    }
+
     const agentRow = await findUserAgent(input.userId, input.agentId)
     const conversation = await getOrCreateConversation(
         input.userId,
@@ -203,12 +210,6 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
 
     try {
         const history = await loadConversationHistory(conversation.id)
-        await db.insert(messages).values({
-            conversationId: conversation.id,
-            role: 'user',
-            content: input.message,
-        })
-
         return {
             agent: createAgentFromConfig(agentRow),
             conversation,
@@ -244,7 +245,11 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
             }
         }
 
-        await persistAssistantMessage(execution.conversation.id, state)
+        if (input.abortSignal?.aborted) {
+            throw createApiError(499, 'REQUEST_ABORTED', 'Request was aborted during execution')
+        }
+
+        await persistConversationTurn(execution.conversation.id, input.message.trim(), state)
         return {
             reply: state.reply,
             sessionId: execution.conversation.sessionId,
@@ -258,7 +263,6 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
 export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEvent> {
     const execution = await prepareExecution(input)
     const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
-    let failed = false
 
     try {
         for await (const event of execution.agent.run(input.message, {
@@ -290,7 +294,6 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             } else if (event.type === 'finish') {
                 yield {type: 'finish', usage: event.usage}
             } else if (event.type === 'error') {
-                failed = true
                 throw createApiError(
                     502,
                     'AGENT_EXECUTION_FAILED',
@@ -299,10 +302,10 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             }
         }
 
-        await persistAssistantMessage(execution.conversation.id, state)
-        if (!failed && !input.abortSignal?.aborted) {
-            yield {type: 'done', sessionId: execution.conversation.sessionId}
-        }
+        if (input.abortSignal?.aborted) return
+
+        await persistConversationTurn(execution.conversation.id, input.message.trim(), state)
+        yield {type: 'done', sessionId: execution.conversation.sessionId}
     } finally {
         execution.lease.release()
     }
