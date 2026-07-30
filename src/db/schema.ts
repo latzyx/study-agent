@@ -137,6 +137,36 @@ export const messages = pgTable('messages', {
     ),
 ])
 
+export const chatRequests = pgTable('chat_requests', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id')
+        .references(() => users.id, {onDelete: 'cascade'})
+        .notNull(),
+    idempotencyKey: varchar('idempotency_key', {length: 100}).notNull(),
+    requestHash: varchar('request_hash', {length: 64}).notNull(),
+    agentId: uuid('agent_id').references(() => agents.id, {onDelete: 'set null'}),
+    conversationId: uuid('conversation_id')
+        .references(() => conversations.id, {onDelete: 'set null'}),
+    sessionId: varchar('session_id', {length: 100}),
+    traceId: varchar('trace_id', {length: 64}),
+    status: varchar('status', {length: 20}).default('running').notNull(),
+    result: jsonb('result').$type<Record<string, unknown>>(),
+    errorCode: varchar('error_code', {length: 100}),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at', {withTimezone: true}).defaultNow().notNull(),
+    finishedAt: timestamp('finished_at', {withTimezone: true}),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+}, (table) => [
+    uniqueIndex('chat_requests_user_key_uidx').on(table.userId, table.idempotencyKey),
+    index('chat_requests_status_updated_at_idx').on(table.status, table.updatedAt),
+    index('chat_requests_trace_id_idx').on(table.traceId),
+    check(
+        'chat_requests_status_check',
+        sql`${table.status} in ('running', 'success', 'error', 'aborted')`,
+    ),
+])
+
 export const aiRuns = pgTable('ai_runs', {
     id: uuid('id').defaultRandom().primaryKey(),
     traceId: varchar('trace_id', {length: 64}).notNull().unique(),
