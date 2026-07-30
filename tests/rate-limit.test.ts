@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'bun:test'
-import {KeyedConcurrencyLimiter} from '../src/services/chat-concurrency-service'
+import {InMemoryChatConcurrencyBackend} from '../src/services/chat-concurrency-service'
 import {FixedWindowRateLimiter} from '../src/services/rate-limit-service'
 
 describe('FixedWindowRateLimiter', () => {
@@ -37,26 +37,26 @@ describe('FixedWindowRateLimiter', () => {
     })
 })
 
-describe('KeyedConcurrencyLimiter', () => {
-    test('acquires all keys atomically and releases idempotently', () => {
-        const limiter = new KeyedConcurrencyLimiter()
-        const first = limiter.tryAcquire([
+describe('InMemoryChatConcurrencyBackend', () => {
+    test('acquires all keys atomically and releases idempotently', async () => {
+        const backend = new InMemoryChatConcurrencyBackend()
+        const first = await backend.tryAcquire([
             {key: 'user:1', limit: 2},
             {key: 'session:1', limit: 1},
         ])
 
         expect(first).not.toBeNull()
-        expect(limiter.count('user:1')).toBe(1)
-        expect(limiter.count('session:1')).toBe(1)
-        expect(limiter.tryAcquire([
+        expect(backend.count('user:1')).toBe(1)
+        expect(backend.count('session:1')).toBe(1)
+        await expect(backend.tryAcquire([
             {key: 'user:1', limit: 2},
             {key: 'session:1', limit: 1},
-        ])).toBeNull()
-        expect(limiter.count('user:1')).toBe(1)
+        ])).resolves.toBeNull()
+        expect(backend.count('user:1')).toBe(1)
 
-        first?.release()
-        first?.release()
-        expect(limiter.count('user:1')).toBe(0)
-        expect(limiter.count('session:1')).toBe(0)
+        await first?.release()
+        await first?.release()
+        expect(backend.count('user:1')).toBe(0)
+        expect(backend.count('session:1')).toBe(0)
     })
 })
