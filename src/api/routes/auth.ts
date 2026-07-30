@@ -15,7 +15,9 @@ import {
 import {authPlugin} from '../middleware/auth.js'
 import {loginBody, refreshBody, registerBody} from '../schemas/auth.js'
 
-function disableAuthResponseCaching(set: {headers: Record<string, string>}): void {
+function disableAuthResponseCaching(set: {
+    headers: Record<string, string | number>
+}): void {
     set.headers['cache-control'] = 'no-store'
     set.headers.pragma = 'no-cache'
 }
