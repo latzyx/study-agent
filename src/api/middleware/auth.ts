@@ -13,6 +13,15 @@ function resolveJwtSecret(): string {
     return 'study-agent-dev-secret-change-me'
 }
 
+function parseCsv(value?: string): Set<string> {
+    return new Set(
+        (value ?? '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean),
+    )
+}
+
 export const JWT_SECRET = resolveJwtSecret()
 
 export interface AccessTokenPayload {
@@ -47,10 +56,25 @@ export async function authenticateAccessToken(
     }
 }
 
+export function hasAdminAccess(user: AccessTokenPayload): boolean {
+    const adminUserIds = parseCsv(process.env.ADMIN_USER_IDS)
+    const adminUsernames = parseCsv(process.env.ADMIN_USERNAMES)
+
+    return adminUserIds.has(user.sub)
+        || (typeof user.username === 'string' && adminUsernames.has(user.username))
+}
+
 export function unauthorizedResponse(): Response {
     return Response.json(
         {success: false, error: {code: 'UNAUTHORIZED', message: 'Authentication required'}},
         {status: 401},
+    )
+}
+
+export function forbiddenResponse(message = 'Insufficient permissions'): Response {
+    return Response.json(
+        {success: false, error: {code: 'FORBIDDEN', message}},
+        {status: 403},
     )
 }
 
