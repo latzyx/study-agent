@@ -1,11 +1,5 @@
-import {and, desc, eq, sql} from 'drizzle-orm'
-import {
-    bindTelemetryIntegration,
-    type TelemetryIntegration,
-} from 'ai'
-import type {
-    AgentTraceRecorder,
-} from '../agent/types/agent.js'
+import {and, asc, desc, eq, lt, sql} from 'drizzle-orm'
+import type {AgentTraceRecorder} from '../agent/types/agent.js'
 import {createApiError} from '../api/errors/api-error.js'
 import {env} from '../config/env.js'
 import {db} from '../db/index.js'
@@ -77,7 +71,7 @@ function truncateString(value: string): string {
     return `${value.slice(0, limit)}…[truncated ${value.length - limit} chars]`
 }
 
-function sanitizeSnapshot(value: unknown, depth = 0): unknown {
+export function sanitizeTraceSnapshot(value: unknown, depth = 0): unknown {
     if (value === null || value === undefined) return value ?? null
     if (typeof value === 'string') return truncateString(value)
     if (typeof value === 'number' || typeof value === 'boolean') return value
@@ -94,7 +88,7 @@ function sanitizeSnapshot(value: unknown, depth = 0): unknown {
     if (Array.isArray(value)) {
         return value
             .slice(0, MAX_ARRAY_ITEMS)
-            .map((item) => sanitizeSnapshot(item, depth + 1))
+            .map((item) => sanitizeTraceSnapshot(item, depth + 1))
     }
 
     if (typeof value === 'object') {
@@ -104,7 +98,7 @@ function sanitizeSnapshot(value: unknown, depth = 0): unknown {
         for (const [key, item] of entries) {
             output[key] = SECRET_KEY_PATTERN.test(key)
                 ? '[redacted]'
-                : sanitizeSnapshot(item, depth + 1)
+                : sanitizeTraceSnapshot(item, depth + 1)
         }
         return output
     }
@@ -135,37 +129,6 @@ function errorFrom(value: unknown): Error {
     return value instanceof Error ? value : new Error(String(value))
 }
 
-class DatabaseTelemetryIntegration implements TelemetryIntegration {
-    constructor(
-        private readonly trace: DatabaseAgentTrace,
-        private readonly agentStep: number,
-    ) {}
-
-    onStart(event: any): void {
-        this.trace.generationStarted(this.agentStep, event)
-    }
-
-    onStepStart(event: any): void {
-        this.trace.providerStepStarted(this.agentStep, event)
-    }
-
-    onToolCallStart(event: any): void {
-        this.trace.aiSdkToolStarted(this.agentStep, event)
-    }
-
-    onToolCallFinish(event: any): void {
-        this.trace.aiSdkToolFinished(this.agentStep, event)
-    }
-
-    onStepFinish(event: any): void {
-        this.trace.providerStepFinished(this.agentStep, event)
-    }
-
-    onFinish(event: any): void {
-        this.trace.generationFinished(this.agentStep, event)
-    }
-}
-
 export class DatabaseAgentTrace implements AgentTraceRecorder {
     private readonly queue = new TraceWriteQueue()
     private readonly spanStartedAt = new Map<string, number>()
@@ -174,7 +137,6 @@ export class DatabaseAgentTrace implements AgentTraceRecorder {
         readonly runId: string,
         readonly traceId: string,
         private readonly functionId: string,
-        private readonly metadata: Record<string, unknown>,
     ) {}
 
     private elapsed(spanKey: string, fallback?: number): number {
@@ -210,9 +172,9 @@ export class DatabaseAgentTrace implements AgentTraceRecorder {
                 modelProvider: input.model?.provider,
                 modelId: input.model?.modelId,
                 inputSnapshot: env.tracing.recordInputs
-                    ? sanitizeSnapshot(input.input)
+                    ? sanitizeTraceSnapshot(input.input)
                     : undefined,
-                metadata: sanitizeSnapshot(input.metadata),
+                metadata: sanitizeTraceSnapshot(input.metadata),
             }).onConflictDoUpdate({
                 target: [aiSpans.runId, aiSpans.spanKey],
                 set: {
@@ -224,9 +186,9 @@ export class DatabaseAgentTrace implements AgentTraceRecorder {
                     modelProvider: input.model?.provider,
                     modelId: input.model?.modelId,
                     inputSnapshot: env.tracing.recordInputs
-                        ? sanitizeSnapshot(input.input)
+                        ? sanitizeTraceSnapshot(input.input)
                         : undefined,
-                    metadata: sanitizeSnapshot(input.metadata),
+                    metadata: sanitizeTraceSnapshot(input.metadata),
                     startedAt: new Date(),
                     finishedAt: null,
                     durationMs: null,
@@ -252,7 +214,7 @@ export class DatabaseAgentTrace implements AgentTraceRecorder {
             await db.update(aiSpans).set({
                 status: input.status,
                 outputSnapshot: env.tracing.recordOutputs
-                    ? sanitizeSnapshot(input.output)
+                    ? sanitizeTraceSnapshot(input.output)
                     : undefined,
                 inputTokens: input.usage?.inputTokens,
                 outputTokens: input.usage?.outputTokens,
@@ -283,9 +245,12 @@ export class DatabaseAgentTrace implements AgentTraceRecorder {
                 agentStep: stepNumber,
                 requestedModel: model,
             },
-            integrations: [bindTelemetryIntegration(
-                new DatabaseTelemetryIntegration(this, stepNumber),
-            )],
+            onStart: (event) => this.generationStarted(stepNumber, event),
+            onStepStart: (event) => this.providerStepStarted(stepNumber, event),
+            onToolCallStart: (event) => this.aiSdkToolStarted(stepNumber, event),
+            onToolCallFinish: (event) => this.aiSdkToolFinished(stepNumber, event),
+            onStepFinish: (event) => this.providerStepFinished(stepNumber, event),
+            onFinish: (event) => this.generationFinished(stepNumber, event),
         }
     }
 
@@ -450,18 +415,13 @@ export async function createAiTrace(input: CreateAiTraceInput): Promise<Database
         sessionId: input.sessionId,
         functionId: input.functionId,
         status: 'running',
-        inputSnapshot: env.tracing.recordInputs ? sanitizeSnapshot(input.input) : undefined,
-        metadata: sanitizeSnapshot(input.metadata),
+        inputSnapshot: env.tracing.recordInputs ? sanitizeTraceSnapshot(input.input) : undefined,
+        metadata: sanitizeTraceSnapshot(input.metadata),
     }).returning({id: aiRuns.id})
 
     if (!run) throw createApiError(500, 'TRACE_CREATE_FAILED', 'Failed to create AI trace')
 
-    return new DatabaseAgentTrace(
-        run.id,
-        traceId,
-        input.functionId,
-        input.metadata ?? {},
-    )
+    return new DatabaseAgentTrace(run.id, traceId, input.functionId)
 }
 
 export async function finishAiTrace(
@@ -480,7 +440,7 @@ export async function finishAiTrace(
     await db.update(aiRuns).set({
         status: input.status,
         outputSnapshot: env.tracing.recordOutputs
-            ? sanitizeSnapshot(input.output)
+            ? sanitizeTraceSnapshot(input.output)
             : undefined,
         inputTokens: input.usage?.inputTokens,
         outputTokens: input.usage?.outputTokens,
@@ -562,10 +522,34 @@ export async function getAiTrace(userId: string, traceId: string) {
     const spans = await db.select()
         .from(aiSpans)
         .where(eq(aiSpans.runId, run.id))
-        .orderBy(aiSpans.startedAt)
+        .orderBy(asc(aiSpans.startedAt))
 
     return {
         run: serializeRun(run),
         spans: spans.map(serializeSpan),
     }
+}
+
+export async function recoverStaleAiRuns(staleAfterMinutes = 60): Promise<number> {
+    const cutoff = new Date(Date.now() - staleAfterMinutes * 60_000)
+    const recovered = await db.update(aiRuns).set({
+        status: 'aborted',
+        errorName: 'StaleRunRecovered',
+        errorMessage: 'Run was still marked as running after process interruption',
+        finishedAt: new Date(),
+        durationMs: sql<number>`greatest(0, extract(epoch from (now() - ${aiRuns.startedAt})) * 1000)::int`,
+    }).where(and(
+        eq(aiRuns.status, 'running'),
+        lt(aiRuns.startedAt, cutoff),
+    )).returning({id: aiRuns.id})
+
+    return recovered.length
+}
+
+export async function purgeExpiredAiTraces(): Promise<number> {
+    const cutoff = new Date(Date.now() - env.tracing.retentionDays * 86_400_000)
+    const deleted = await db.delete(aiRuns)
+        .where(lt(aiRuns.createdAt, cutoff))
+        .returning({id: aiRuns.id})
+    return deleted.length
 }
