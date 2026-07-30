@@ -60,8 +60,8 @@ export function resolveBuiltinTool(toolName: string): Tool | undefined {
 export function resolveAgentTools(agentKey: BuiltinAgentKey, requestedNames?: readonly string[]): Tool[] {
     const definition = getBuiltinAgentDefinition(agentKey)
     const allowed = new Map(definition.tools.map((tool) => [tool.name, tool]))
-    const names = requestedNames ?? [...allowed.keys()]
-    const unknownOrUnowned = [...new Set(names)].filter((name) => !allowed.has(name))
+    const names = [...new Set(requestedNames ?? [...allowed.keys()])]
+    const unknownOrUnowned = names.filter((name) => !allowed.has(name))
 
     if (unknownOrUnowned.length > 0) {
         throw new Error(
@@ -69,5 +69,9 @@ export function resolveAgentTools(agentKey: BuiltinAgentKey, requestedNames?: re
         )
     }
 
-    return [...new Set(names)].map((name) => allowed.get(name)!)
+    return names.map((name) => {
+        const tool = allowed.get(name)
+        if (!tool) throw new Error(`Tool ownership changed during resolution: ${name}`)
+        return tool
+    })
 }
