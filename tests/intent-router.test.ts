@@ -47,4 +47,14 @@ describe('IntentRouter', () => {
         expect(decision.requiresClarification).toBe(true)
         expect(decision.selectedAgentKey).toBe('general')
     })
+
+    test('rejects non-finite classifier scores', async () => {
+        const classifier: IntentClassifier = {
+            name: 'broken-model',
+            classify: () => [{agentKey: 'math', score: Number.NaN, reason: 'broken'}],
+        }
+
+        await expect(new IntentRouter({classifiers: [classifier]}).route('test'))
+            .rejects.toThrow('Intent classifier returned an invalid score: broken-model')
+    })
 })
