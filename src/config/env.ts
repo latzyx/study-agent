@@ -7,6 +7,10 @@ const rawEnvSchema = z.object({
     CORS_ORIGINS: z.string().default(''),
 
     JWT_SECRET: z.string().trim().optional(),
+    JWT_ISSUER: z.string().trim().min(1).default('study-agent'),
+    JWT_AUDIENCE: z.string().trim().min(1).default('study-agent-api'),
+    ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).max(86400).default(15 * 60),
+    REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).max(90 * 86400).default(7 * 86400),
     ADMIN_USER_IDS: z.string().default(''),
     ADMIN_USERNAMES: z.string().default(''),
 
@@ -77,6 +81,10 @@ export const env = Object.freeze({
     },
     auth: {
         jwtSecret: raw.JWT_SECRET || developmentJwtSecret,
+        issuer: raw.JWT_ISSUER,
+        audience: raw.JWT_AUDIENCE,
+        accessTokenTtlSeconds: raw.ACCESS_TOKEN_TTL_SECONDS,
+        refreshTokenTtlSeconds: raw.REFRESH_TOKEN_TTL_SECONDS,
         adminUserIds: new Set(splitCsv(raw.ADMIN_USER_IDS)),
         adminUsernames: new Set(splitCsv(raw.ADMIN_USERNAMES)),
     },
