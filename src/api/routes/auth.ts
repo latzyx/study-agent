@@ -12,19 +12,6 @@ function errorResponse(status: number, code: string, message: string): Response 
     return Response.json({success: false, error: {code, message}}, {status})
 }
 
-function setAuthCookie(auth: any, token: string): void {
-    if (!auth) return
-
-    auth.set({
-        value: token,
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path: '/',
-        maxAge: ACCESS_TOKEN_TTL_SECONDS,
-    })
-}
-
 async function createTokens(
     JWT: {sign(payload: Record<string, unknown>): Promise<string>},
     user: {id: string; username: string},
@@ -52,7 +39,7 @@ export const authRoutes = new Elysia({prefix: '/auth'})
     .post(
         '/register',
         // @ts-ignore - Elysia body type inference
-        async ({body, JWT, cookie: {auth}}) => {
+        async ({body, JWT}) => {
             const email = body.email.trim().toLowerCase()
             const username = body.username.trim()
             const [existing] = await db.select({id: users.id}).from(users)
@@ -73,8 +60,6 @@ export const authRoutes = new Elysia({prefix: '/auth'})
             if (!newUser) return errorResponse(500, 'CREATE_FAILED', 'Failed to create user')
 
             const {token, refreshToken} = await createTokens(JWT, newUser)
-            setAuthCookie(auth, token)
-
             return {
                 success: true,
                 data: {
@@ -89,7 +74,7 @@ export const authRoutes = new Elysia({prefix: '/auth'})
     .post(
         '/login',
         // @ts-ignore - Elysia body type inference
-        async ({body, JWT, cookie: {auth}}) => {
+        async ({body, JWT}) => {
             const email = body.email.trim().toLowerCase()
             const [found] = await db.select().from(users).where(eq(users.email, email)).limit(1)
             if (!found || !(await Bun.password.verify(body.password, found.passwordHash))) {
@@ -97,8 +82,6 @@ export const authRoutes = new Elysia({prefix: '/auth'})
             }
 
             const {token, refreshToken} = await createTokens(JWT, found)
-            setAuthCookie(auth, token)
-
             return {
                 success: true,
                 data: {
@@ -113,7 +96,7 @@ export const authRoutes = new Elysia({prefix: '/auth'})
     .post(
         '/refresh',
         // @ts-ignore - Elysia body type inference
-        async ({body, JWT, cookie: {auth}}) => {
+        async ({body, JWT}) => {
             const payload = await JWT.verify(body.token)
             if (!payload || payload.type !== 'refresh' || typeof payload.sub !== 'string') {
                 return errorResponse(401, 'INVALID_TOKEN', 'Invalid refresh token')
@@ -123,8 +106,6 @@ export const authRoutes = new Elysia({prefix: '/auth'})
             if (!found) return errorResponse(401, 'USER_NOT_FOUND', 'User not found')
 
             const {token, refreshToken} = await createTokens(JWT, found)
-            setAuthCookie(auth, token)
-
             return {
                 success: true,
                 data: {
