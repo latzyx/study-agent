@@ -29,6 +29,9 @@ const rawEnvSchema = z.object({
     CHAT_MAX_CONCURRENT_PER_SESSION: z.coerce.number().int().min(1).max(20).default(1),
     RATE_LIMIT_MAX_KEYS: z.coerce.number().int().min(100).max(1_000_000).default(10_000),
 
+    BACKGROUND_TASK_MAX_PENDING: z.coerce.number().int().min(10).max(100_000).default(1000),
+    BACKGROUND_TASK_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
     DATABASE_URL: z.string().trim().min(1).optional(),
     DB_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
     DB_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(0).max(3600).default(20),
@@ -136,6 +139,10 @@ export const env = Object.freeze({
             maxConcurrentPerUser: raw.CHAT_MAX_CONCURRENT_PER_USER,
             maxConcurrentPerSession: raw.CHAT_MAX_CONCURRENT_PER_SESSION,
         },
+    },
+    backgroundTasks: {
+        maxPending: raw.BACKGROUND_TASK_MAX_PENDING,
+        shutdownTimeoutMs: raw.BACKGROUND_TASK_SHUTDOWN_TIMEOUT_MS,
     },
     database: {
         url: raw.DATABASE_URL,
