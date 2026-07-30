@@ -42,7 +42,7 @@ export type LLMProviderErrorCode =
     | 'UNKNOWN'
 
 export class LLMProviderError extends Error {
-    readonly name = 'LLMProviderError'
+    override readonly name = 'LLMProviderError'
 
     constructor(
         message: string,
