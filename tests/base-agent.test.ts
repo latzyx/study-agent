@@ -86,6 +86,15 @@ class TestAgent extends BaseAgent {
     }
 }
 
+const config: AgentConfig = {
+    name: 'math-agent',
+    description: 'test agent',
+    systemPrompt: 'You are a calculator.',
+    modelProfile: 'general',
+    modelId: 'lmstudio:test-model',
+    maxSteps: 3,
+}
+
 describe('BaseAgent', () => {
     test('passes history and executes every tool call in a step', async () => {
         const contexts: ToolContext[] = []
@@ -95,14 +104,7 @@ describe('BaseAgent', () => {
             createMathTool('add', (a, b) => a + b, contexts),
             createMathTool('multiply', (a, b) => a * b, contexts),
         ]
-        const agent = new TestAgent({
-            name: 'math-agent',
-            description: 'test agent',
-            systemPrompt: 'You are a calculator.',
-            modelProfile: 'general',
-            modelId: 'lmstudio:test-model',
-            maxSteps: 3,
-        }, provider, registry, tools)
+        const agent = new TestAgent(config, provider, registry, tools)
 
         const events: AgentEvent[] = []
         for await (const event of agent.run('继续计算', {
@@ -128,8 +130,54 @@ describe('BaseAgent', () => {
         expect(provider.requests[0]?.model).toBe('lmstudio:test-model')
         expect(provider.requests[0]?.messages).toContainEqual({role: 'user', content: '上一个问题'})
         expect(provider.requests[0]?.messages).toContainEqual({role: 'assistant', content: '上一个答案'})
-        expect(provider.requests[1]?.messages).toContainEqual({role: 'user', content: 'Tool add result: 5'})
-        expect(provider.requests[1]?.messages).toContainEqual({role: 'user', content: 'Tool multiply result: 20'})
+        expect(provider.requests[1]?.messages).toContainEqual({
+            role: 'tool',
+            name: 'add',
+            toolCallId: 'call-add',
+            content: '5',
+        })
+        expect(provider.requests[1]?.messages).toContainEqual({
+            role: 'tool',
+            name: 'multiply',
+            toolCallId: 'call-multiply',
+            content: '20',
+        })
+    })
+
+    test('only exposes tools declared by the current agent', async () => {
+        const contexts: ToolContext[] = []
+        const registry = new ToolRegistry()
+        const unrelatedTool = createMathTool('unrelated', (a, b) => a - b, contexts)
+        registry.register(unrelatedTool)
+
+        const provider = new FakeLLMProvider()
+        const agent = new TestAgent(
+            config,
+            provider,
+            registry,
+            [
+                createMathTool('add', (a, b) => a + b, contexts),
+                createMathTool('multiply', (a, b) => a * b, contexts),
+            ],
+        )
+
+        for await (const _event of agent.run('继续计算')) {
+            // consume stream
+        }
+
+        expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual(['add', 'multiply'])
+    })
+
+    test('rejects empty input before calling the model', async () => {
+        const provider = new FakeLLMProvider()
+        const agent = new TestAgent(config, provider, new ToolRegistry(), [])
+        const events: AgentEvent[] = []
+
+        for await (const event of agent.run('   ')) events.push(event)
+
+        expect(provider.requests).toHaveLength(0)
+        expect(events).toHaveLength(1)
+        expect(events[0]?.type).toBe('error')
     })
 })
 
