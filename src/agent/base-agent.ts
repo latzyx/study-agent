@@ -32,6 +32,10 @@ function normalizeRequiredString(value: string | undefined, name: string): strin
     return normalized
 }
 
+function toolNames(tools: readonly Tool[]): string {
+    return tools.map((tool) => tool.name).join('\u0000')
+}
+
 function serializeToolResult(result: unknown, maxChars: number): string {
     const seen = new WeakSet<object>()
     let serialized: string
@@ -78,12 +82,11 @@ export abstract class BaseAgent implements Agent {
         if (this.toolsRegistered && this.agentTools) return this.agentTools
 
         const tools = this.getTools()
-        if (this.config.tools !== undefined && tools !== this.config.tools) {
-            const configuredNames = this.config.tools.map((tool) => tool.name)
-            const resolvedNames = tools.map((tool) => tool.name)
-            if (configuredNames.join('\u0000') !== resolvedNames.join('\u0000')) {
-                throw new Error('Agent config.tools conflicts with getTools(); use one authoritative tool source')
-            }
+        if (
+            this.config.tools !== undefined
+            && toolNames(this.config.tools) !== toolNames(tools)
+        ) {
+            throw new Error('Agent config.tools conflicts with getTools(); use one authoritative tool source')
         }
 
         const toolMap = new Map<string, Tool>()
