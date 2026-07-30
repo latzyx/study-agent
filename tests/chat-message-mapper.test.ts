@@ -2,6 +2,7 @@ import {describe, expect, test} from 'bun:test'
 import {
     buildTurnMessageRows,
     restoreLLMMessages,
+    trimStoredHistoryToTurnBoundary,
 } from '../src/services/chat-message-mapper'
 
 describe('chat message mapper', () => {
@@ -51,6 +52,55 @@ describe('chat message mapper', () => {
                 toolCallId: 'call-1',
             },
         ])
+    })
+
+    test('drops leading orphan tool rows when a history query cuts through a turn', () => {
+        const rows = [
+            {
+                role: 'tool' as const,
+                content: '{"old":true}',
+                toolCalls: {toolCallId: 'old', name: 'calculator'},
+            },
+            {role: 'user' as const, content: 'new question', toolCalls: null},
+            {role: 'assistant' as const, content: 'new answer', toolCalls: null},
+        ]
+
+        expect(trimStoredHistoryToTurnBoundary(rows)).toEqual(rows.slice(1))
+        expect(restoreLLMMessages(rows)).toEqual([
+            {role: 'user', content: 'new question'},
+            {role: 'assistant', content: 'new answer', toolCalls: undefined},
+        ])
+    })
+
+    test('drops mismatched and duplicate persisted tool calls', () => {
+        expect(restoreLLMMessages([
+            {role: 'user', content: 'calculate', toolCalls: null},
+            {
+                role: 'assistant',
+                content: null,
+                toolCalls: [
+                    {id: 'call-1', name: 'calculator', args: {}},
+                    {id: 'call-1', name: 'calculator', args: {duplicate: true}},
+                ],
+            },
+            {
+                role: 'tool',
+                content: '{}',
+                toolCalls: {toolCallId: 'call-1', name: 'current_time'},
+            },
+        ])).toEqual([
+            {role: 'user', content: 'calculate'},
+            {
+                role: 'assistant',
+                content: '',
+                toolCalls: [{id: 'call-1', name: 'calculator', input: {}}],
+            },
+        ])
+    })
+
+    test('rejects persistence of an empty assistant response', () => {
+        expect(() => buildTurnMessageRows('conversation-1', 'hello', '   ', []))
+            .toThrow('Cannot persist a turn without an assistant response')
     })
 
     test('drops malformed stored tool messages instead of inventing ids', () => {
