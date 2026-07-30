@@ -6,20 +6,14 @@ import {
     serializeFile,
 } from '../../services/file-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
-import {
-    authenticateAccessToken,
-    authPlugin,
-    unauthorizedResponse,
-} from '../middleware/auth.js'
+import {authPlugin, requireAccessToken} from '../middleware/auth.js'
 
 export const fileRoutes = new Elysia({prefix: '/files'})
     .use(authPlugin)
     .post(
         '/upload',
         async ({JWT, headers, body, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const saved = await saveUserFile(user.sub, body.file)
             await recordAuditLog({
                 userId: user.sub,
@@ -44,9 +38,7 @@ export const fileRoutes = new Elysia({prefix: '/files'})
     .get(
         '/:id',
         async ({params, JWT, headers}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const file = await findUserFile(user.sub, params.id)
             return {success: true, data: serializeFile(file)}
         },
@@ -58,9 +50,7 @@ export const fileRoutes = new Elysia({prefix: '/files'})
     .delete(
         '/:id',
         async ({params, JWT, headers, request}) => {
-            const user = await authenticateAccessToken(JWT, headers.authorization)
-            if (!user) return unauthorizedResponse()
-
+            const user = await requireAccessToken(JWT, headers.authorization)
             const deleted = await deleteUserFile(user.sub, params.id)
             await recordAuditLog({
                 userId: user.sub,
