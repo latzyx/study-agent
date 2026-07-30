@@ -10,7 +10,7 @@ function resolveRequestId(request: Request): string {
 }
 
 export const requestContextPlugin = new Elysia({name: 'request-context'})
-    .derive(({request, set}) => {
+    .derive({as: 'global'}, ({request, set}) => {
         const requestId = resolveRequestId(request)
         set.headers['x-request-id'] = requestId
 
