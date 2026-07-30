@@ -168,6 +168,7 @@ export abstract class BaseAgent implements Agent {
             const pendingToolCallIds = new Set<string>()
             let fullText = ''
             let usage: LLMUsage | undefined
+            let providerFinished = false
 
             for await (const event of this.llmProvider.stream({
                 model,
@@ -212,6 +213,7 @@ export abstract class BaseAgent implements Agent {
 
                 if (event.type === 'finish') {
                     usage = event.response.usage ?? usage
+                    providerFinished = true
                     break
                 }
 
@@ -219,6 +221,14 @@ export abstract class BaseAgent implements Agent {
                     yield {type: 'error', error: event.error}
                     return
                 }
+            }
+
+            if (!providerFinished) {
+                yield {
+                    type: 'error',
+                    error: new Error(`LLM provider stream ended without finish at step ${step}`),
+                }
+                return
             }
 
             if (pendingToolCalls.length === 0) {
