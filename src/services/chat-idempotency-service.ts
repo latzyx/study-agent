@@ -1,7 +1,7 @@
 import {and, eq, lt} from 'drizzle-orm'
 import {createApiError} from '../api/errors/api-error.js'
 import {db} from '../db/index.js'
-import {chatRequests} from '../db/schema.js'
+import {chatRequests, conversations} from '../db/schema.js'
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,100}$/
 
@@ -141,14 +141,22 @@ export async function beginChatRequest(
 
 export async function attachChatRequestExecution(input: {
     requestRecordId?: string
-    agentId: string
     conversationId: string
     sessionId: string
     traceId?: string
 }): Promise<void> {
     if (!input.requestRecordId) return
+
+    const [conversation] = await db.select({agentId: conversations.agentId})
+        .from(conversations)
+        .where(eq(conversations.id, input.conversationId))
+        .limit(1)
+    if (!conversation) {
+        throw createApiError(404, 'SESSION_NOT_FOUND', 'Conversation no longer exists')
+    }
+
     await db.update(chatRequests).set({
-        agentId: input.agentId,
+        agentId: conversation.agentId,
         conversationId: input.conversationId,
         sessionId: input.sessionId,
         traceId: input.traceId,
