@@ -9,8 +9,7 @@ import type {LLMMessage} from '../../llm/domain/llm-provider.js'
 import {AISDKProviderAdapter} from '../../llm/providers/ai-sdk-provider.js'
 import {providerRegistry} from '../../llm/registry/provider-registry.js'
 import {resolveModel} from '../../llm/registry/model-registry.js'
-import {calculatorTool} from '../../tools/builtin/calculator.tool.js'
-import {currentTimeTool} from '../../tools/builtin/current-time.tool.js'
+import {resolveBuiltinTools} from '../../tools/builtin/index.js'
 import {ToolRegistry} from '../../tools/registry/tool-registry.js'
 import {createApiError} from '../errors/api-error.js'
 import {
@@ -20,7 +19,6 @@ import {
 } from '../middleware/auth.js'
 import {chatBody, chatStreamBody} from '../schemas/chat.js'
 
-const builtinTools = [calculatorTool, currentTimeTool]
 const HISTORY_MESSAGE_LIMIT = 50
 
 type ToolCallRecord = {
@@ -41,7 +39,7 @@ function publicExecutionError(error?: Error): string {
 }
 
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
-    const selectedTools = builtinTools.filter((tool) => agentRow.tools.includes(tool.name))
+    const selectedTools = resolveBuiltinTools(agentRow.tools)
     const modelId = resolveModel(agentRow.modelProfile)
     const config: AgentConfig = {
         name: agentRow.name,
