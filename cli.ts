@@ -2,15 +2,14 @@ import {createInterface} from 'node:readline/promises'
 import {stdin as input, stdout as output} from 'node:process'
 import {GeneralAssistant} from './src/agent/agents/general-assistant.js'
 import {AISDKProviderAdapter} from './src/llm/providers/ai-sdk-provider.js'
-import {providerRegistry} from './src/llm/registry/provider-registry.js'
+import {resolveLanguageModel} from './src/llm/registry/provider-registry.js'
 import {resolveModel} from './src/llm/registry/model-registry.js'
 import {ToolRegistry} from './src/tools/registry/tool-registry.js'
 
 function createCliAgent(): GeneralAssistant {
     const modelId = resolveModel('general')
-    const model = providerRegistry.languageModel(modelId as any)
     const agent = new GeneralAssistant(
-        new AISDKProviderAdapter(model),
+        new AISDKProviderAdapter(resolveLanguageModel),
         new ToolRegistry(),
     )
 
