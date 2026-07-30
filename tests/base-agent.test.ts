@@ -1,7 +1,7 @@
 import {describe, expect, test} from 'bun:test'
 import {z} from 'zod'
 import {BaseAgent} from '../src/agent/base-agent'
-import type {AgentConfig} from '../src/agent/types/agent'
+import type {AgentConfig, AgentEvent} from '../src/agent/types/agent'
 import type {
     LLMProvider,
     LLMRequest,
@@ -14,7 +14,7 @@ import {ToolRegistry} from '../src/tools/registry/tool-registry'
 class FakeLLMProvider implements LLMProvider {
     readonly requests: LLMRequest[] = []
 
-    async generate(): Promise<LLMResponse> {
+    async generate(_request: LLMRequest): Promise<LLMResponse> {
         throw new Error('Not used by this test')
     }
 
@@ -104,7 +104,7 @@ describe('BaseAgent', () => {
             maxSteps: 3,
         }, provider, registry, tools)
 
-        const events = []
+        const events: AgentEvent[] = []
         for await (const event of agent.run('继续计算', {
             history: [
                 {role: 'user', content: '上一个问题'},
