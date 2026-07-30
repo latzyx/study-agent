@@ -7,6 +7,7 @@ const REQUIRED_TABLES = [
     'agent_versions',
     'conversations',
     'messages',
+    'chat_requests',
     'ai_runs',
     'ai_spans',
     'audit_logs',
@@ -22,6 +23,10 @@ const REQUIRED_NOT_NULL_COLUMNS = [
     'agent_versions.agent_id',
     'agent_versions.version',
     'agent_versions.snapshot',
+    'chat_requests.user_id',
+    'chat_requests.idempotency_key',
+    'chat_requests.request_hash',
+    'chat_requests.status',
     'ai_runs.trace_id',
     'ai_runs.function_id',
     'ai_runs.status',
@@ -47,6 +52,10 @@ const REQUIRED_CONSTRAINTS = [
     'agent_versions_changed_by_users_id_fk',
     'agent_versions_version_check',
     'agent_versions_change_type_check',
+    'chat_requests_user_id_users_id_fk',
+    'chat_requests_agent_id_agents_id_fk',
+    'chat_requests_conversation_id_conversations_id_fk',
+    'chat_requests_status_check',
     'ai_runs_trace_id_unique',
     'ai_runs_user_id_users_id_fk',
     'ai_runs_agent_id_agents_id_fk',
@@ -77,6 +86,9 @@ const REQUIRED_INDEXES = [
     'agents_created_by_created_at_idx',
     'agent_versions_agent_version_uidx',
     'agent_versions_agent_created_at_idx',
+    'chat_requests_user_key_uidx',
+    'chat_requests_status_updated_at_idx',
+    'chat_requests_trace_id_idx',
     'ai_runs_user_created_at_idx',
     'ai_runs_agent_created_at_idx',
     'ai_runs_conversation_created_at_idx',
@@ -168,8 +180,8 @@ async function verify(): Promise<void> {
     const [migrationCount] = await sql<{count: number}[]>`
         select count(*)::int as count from study_agent_schema_migrations
     `
-    if ((migrationCount?.count ?? 0) < 3) {
-        throw new Error('Expected at least three applied migration records')
+    if ((migrationCount?.count ?? 0) < 4) {
+        throw new Error('Expected at least four applied migration records')
     }
 
     console.log('[db:verify] migrated schema verified')
