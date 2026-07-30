@@ -2,13 +2,16 @@
 
 基于 **Bun + TypeScript + AI SDK + Elysia + Drizzle ORM + PostgreSQL** 的多 Agent 学习与实践项目。
 
-当前项目已经从简单示例扩展为具备认证、会话、工具执行、审计、文件管理、运行时保护和工程化部署能力的 Agent API。
+当前项目已经从简单示例扩展为具备认证、会话、工具执行、意图路由、审计、文件管理、运行时保护和工程化部署能力的 Agent API。
 
 ## 核心能力
 
 - OpenAI、Anthropic、LM Studio、vLLM Provider Registry
 - 按 `fast/general/reasoning/vision` 配置模型档位
+- 请求级模型解析，禁止传入 model 后仍使用构造默认模型
+- 可组合的意图识别分类器、候选排序、置信度与歧义检测
 - Agent 配置、工具白名单和多步工具执行
+- Tool 按 Agent 目录归属，并校验唯一 owner
 - JSON 与 SSE 流式聊天
 - 最近 50 条会话消息上下文
 - Bearer-only JWT 认证
@@ -20,6 +23,61 @@
 - PostgreSQL 就绪检查、版本化迁移和优雅关闭
 - Swagger API 文档
 - Bun 单元测试、类型检查、构建和 PostgreSQL 迁移 CI
+
+## Agent 与 Tool 目录约定
+
+专业 Agent 的工具必须放在自己的目录下：
+
+```text
+src/agents/
+├── general/
+│   └── index.ts
+├── math/
+│   ├── index.ts
+│   └── tools/
+│       └── calculator.tool.ts
+├── time/
+│   ├── index.ts
+│   └── tools/
+│       └── current-time.tool.ts
+├── catalog.ts
+└── domain/
+    └── agent-definition.ts
+```
+
+约束：
+
+- 一个 Tool 只能属于一个内置 Agent。
+- `catalog.ts` 是 Agent 定义和 Tool owner 的唯一聚合入口。
+- `resolveAgentTools(agentKey, names)` 会拒绝加载其他 Agent 的工具。
+- `src/tools/builtin` 仅作为旧代码兼容门面，不再保存 Tool 的真实实现。
+- 新增 Agent 时应同时新增独立目录、定义文件、tools 子目录和意图标签。
+
+## 意图识别
+
+意图层位于：
+
+```text
+src/intent/
+├── classifiers/
+│   └── keyword-intent-classifier.ts
+├── domain/
+│   └── intent.ts
+├── intent-router.ts
+└── index.ts
+```
+
+`IntentRouter` 支持：
+
+- 多分类器并行执行。
+- 分类器权重。
+- 候选 Agent 排序。
+- 最低置信度阈值。
+- 第一、第二候选的歧义判断。
+- 无匹配时回退 `general`。
+- 调用方显式指定 Agent 时，以显式参数为权威来源。
+
+后续接入本地 MacBERT、Embedding Router 或 LLM 分类器时，只需实现 `IntentClassifier`，无需修改 Router 主流程。
 
 ## 环境要求
 
@@ -217,116 +275,5 @@ Agent 创建或更新时，`tools` 只能引用已注册的内置工具。未知
 
 当前工具：
 
-- `calculator`：有限数字的加、减、乘、除
-- `current_time`：指定 IANA 时区的当前时间，默认 UTC
-
-## 会话规则
-
-- Agent、会话和消息按当前用户隔离。
-- 同一用户的 `sessionId` 全局唯一。
-- 已绑定 Agent 的 session 不能切换到另一个 Agent。
-- 并发创建同一 session 时通过数据库唯一约束收敛。
-- 工具调用和结果会保存，并进入后续对话上下文。
-- 同一 session 的模型执行默认串行化。
-
-## 管理员权限
-
-通过环境变量配置管理员：
-
-```dotenv
-ADMIN_USER_IDS=uuid-1,uuid-2
-ADMIN_USERNAMES=admin,lazy
-```
-
-只有对应用户可以访问：
-
-```text
-GET /api/v1/admin/audit-logs
-GET /api/v1/admin/operation-logs
-```
-
-操作日志支持用户、方法、路径、状态码、requestId 和时间范围筛选。
-
-## 请求追踪与错误结构
-
-客户端可以传入：
-
-```http
-X-Request-Id: frontend-request-123
-```
-
-服务端会在响应头返回 `X-Request-Id`。没有提供合法值时会自动生成 UUID。
-
-错误响应统一为：
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "Request validation failed",
-    "requestId": "..."
-  }
-}
-```
-
-生产环境不会向客户端暴露模型 Provider、数据库或内部堆栈信息。
-
-## 常用命令
-
-```bash
-bun run typecheck          # TypeScript 类型检查
-bun test                   # 单元测试
-bun run check              # 类型检查 + 单元测试
-bun run build              # 构建 Bun 生产产物
-bun run db:generate -- 名称 # 创建下一份连续编号 SQL 迁移
-bun run db:check           # 校验迁移文件命名、版本和 checksum
-bun run db:migrate         # advisory lock 下应用未执行迁移
-bun run db:verify          # 验证表、列、约束和索引
-bun run db:push            # 仅开发环境直接同步 Schema
-bun run db:studio          # Drizzle Studio
-```
-
-GitHub Actions 会执行：
-
-```text
-bun install --frozen-lockfile
-bun run typecheck
-bun test
-bun run db:check
-bun run build
-PostgreSQL 16: db:migrate → 再次 db:migrate → db:verify
-```
-
-当前迁移已经在 GitHub Actions 的 PostgreSQL 16 服务中通过首次执行、重复幂等和 Schema 完整性验证。
-
-## 目录结构
-
-```text
-src/
-├── agent/            # Agent 抽象、路由和多 Agent 编排
-├── api/
-│   ├── errors/       # 结构化 API 错误
-│   ├── middleware/   # 认证、请求上下文、异常和日志
-│   ├── routes/       # Elysia API 路由
-│   └── schemas/      # 请求与响应 Schema
-├── app/              # 应用构建与进程启动
-├── config/           # 集中环境配置和校验
-├── db/               # 连接、Schema、迁移执行器和 SQL migrations
-├── llm/              # 模型领域接口、Provider 和注册表
-├── services/         # Auth、Agent、Chat、文件、Token、限流和审计服务
-└── tools/            # 工具定义、目录和执行注册表
-```
-
-## 安全约束
-
-- 业务接口仅接受 `Authorization: Bearer ...`
-- Access Token 校验 issuer、audience、类型和有效期
-- Refresh Token 服务端可撤销，且一次刷新后立即失效
-- Agent、会话历史和文件按当前用户隔离
-- 生产环境必须显式配置强 JWT 密钥
-- Agent 工具使用注册白名单
-- 上传文件默认限制为 10 MiB，并校验存储路径边界
-- 管理日志接口需要显式管理员权限
-- 数据库通过外键、唯一索引和 CHECK 约束维护关键不变量
-- 生产数据库使用版本化 SQL 迁移，不修改已应用迁移
+- `calculator`：归属 `math` Agent，执行有限数字的加、减、乘、除。
+- `current_time`：归属 `time` Agent，获取指定 IANA 时区的当前时间。
