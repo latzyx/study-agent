@@ -10,7 +10,7 @@ const rawEnvSchema = z.object({
     ADMIN_USER_IDS: z.string().default(''),
     ADMIN_USERNAMES: z.string().default(''),
 
-    DATABASE_URL: z.string().trim().min(1, 'DATABASE_URL is required'),
+    DATABASE_URL: z.string().trim().min(1).optional(),
     DB_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
     DB_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(0).max(3600).default(20),
     DB_CONNECT_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(300).default(10),
@@ -108,5 +108,12 @@ export const env = Object.freeze({
         vllmApiKey: raw.VLLM_API_KEY,
     },
 })
+
+export function requireDatabaseUrl(): string {
+    if (!env.database.url) {
+        throw new Error('DATABASE_URL is required when starting the API or using database features')
+    }
+    return env.database.url
+}
 
 export type AppEnvironment = typeof env
