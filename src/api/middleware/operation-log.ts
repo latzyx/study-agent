@@ -29,7 +29,7 @@ function resolveClientIp(headers: Headers): string | null {
 export const operationLogPlugin = new Elysia({name: 'operation-log'})
     .use(authPlugin)
     .use(requestContextPlugin)
-    .onAfterResponse(({
+    .onAfterResponse({as: 'scoped'}, ({
         request,
         set,
         responseValue,
