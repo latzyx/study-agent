@@ -7,6 +7,7 @@ import {db} from '../db/index.js'
 import {agents, conversations, messages} from '../db/schema.js'
 import type {LLMMessage, LLMUsage} from '../llm/domain/llm-provider.js'
 import {AISDKProviderAdapter} from '../llm/providers/ai-sdk-provider.js'
+import {FallbackLLMProvider} from '../llm/providers/fallback-provider.js'
 import {resolveModel} from '../llm/registry/model-registry.js'
 import {providerRegistry} from '../llm/registry/provider-registry.js'
 import {resolveBuiltinTools} from '../tools/builtin/index.js'
@@ -79,6 +80,7 @@ function normalizeError(error: unknown): Error {
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
     const selectedTools = resolveBuiltinTools(agentRow.tools)
     const modelId = resolveModel(agentRow.modelProfile)
+    const fallbackModelId = resolveModel('fallback')
     const config: AgentConfig = {
         name: agentRow.name,
         description: agentRow.description ?? '',
@@ -87,13 +89,17 @@ function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent 
         modelId,
         maxSteps: agentRow.maxSteps,
     }
-    const model = providerRegistry.languageModel(modelId as any)
+    const primary = new AISDKProviderAdapter(providerRegistry.languageModel(modelId as any))
+    const fallback = fallbackModelId !== modelId
+        ? new AISDKProviderAdapter(providerRegistry.languageModel(fallbackModelId as any))
+        : undefined
+    const provider = new FallbackLLMProvider(primary, fallback)
 
     return new (class extends BaseAgent {
         getTools() {
             return selectedTools
         }
-    })(config, new AISDKProviderAdapter(model), new ToolRegistry())
+    })(config, provider, new ToolRegistry())
 }
 
 async function findConversationBySession(userId: string, sessionId: string) {
@@ -160,7 +166,7 @@ async function loadConversationHistory(conversationId: string): Promise<LLMMessa
     })
         .from(messages)
         .where(eq(messages.conversationId, conversationId))
-        .orderBy(desc(messages.createdAt))
+        .orderBy(desc(messages.createdAt), desc(messages.role))
         .limit(HISTORY_MESSAGE_LIMIT)
 
     return recentMessages
@@ -197,22 +203,36 @@ function applyAgentEvent(event: AgentEvent, state: ExecutionState): void {
         return
     }
 
-    if (event.type === 'finish') {
-        state.usage = event.usage
-    }
+    if (event.type === 'finish') state.usage = event.usage
 }
 
-async function persistAssistantMessage(
+function ensureCompleteResponse(state: ExecutionState): void {
+    if (state.reply.trim() || state.toolCalls.length > 0) return
+    throw createApiError(502, 'EMPTY_AGENT_RESPONSE', 'Agent completed without producing a response')
+}
+
+async function persistSuccessfulExchange(
     conversationId: string,
+    inputMessage: string,
     state: Pick<ExecutionState, 'reply' | 'toolCalls'>,
 ): Promise<void> {
-    if (!state.reply && state.toolCalls.length === 0) return
+    const userCreatedAt = new Date()
+    const assistantCreatedAt = new Date(userCreatedAt.getTime() + 1)
 
-    await db.insert(messages).values({
-        conversationId,
-        role: 'assistant',
-        content: state.reply || null,
-        toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+    await db.transaction(async (tx) => {
+        await tx.insert(messages).values({
+            conversationId,
+            role: 'user',
+            content: inputMessage,
+            createdAt: userCreatedAt,
+        })
+        await tx.insert(messages).values({
+            conversationId,
+            role: 'assistant',
+            content: state.reply || null,
+            toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
+            createdAt: assistantCreatedAt,
+        })
     })
 }
 
@@ -282,12 +302,6 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
     try {
         const history = await loadConversationHistory(conversation.id)
         trace = await createTraceSafely(input, conversation)
-        await db.insert(messages).values({
-            conversationId: conversation.id,
-            role: 'user',
-            content: input.message,
-        })
-
         return {
             agent: createAgentFromConfig(agentRow),
             conversation,
@@ -337,7 +351,8 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
             }
         }
 
-        await persistAssistantMessage(execution.conversation.id, state)
+        ensureCompleteResponse(state)
+        await persistSuccessfulExchange(execution.conversation.id, input.message, state)
         await finishTraceSafely(execution.trace, state, 'success')
         return {
             reply: state.reply,
@@ -346,9 +361,6 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
             toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
         }
     } catch (error) {
-        await persistAssistantMessage(execution.conversation.id, state).catch((persistError) => {
-            console.error('[chat] Failed to persist partial assistant message', persistError)
-        })
         const normalizedError = normalizeError(error)
         await finishTraceSafely(
             execution.trace,
@@ -405,7 +417,8 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             }
         }
 
-        await persistAssistantMessage(execution.conversation.id, state)
+        ensureCompleteResponse(state)
+        await persistSuccessfulExchange(execution.conversation.id, input.message, state)
         await finishTraceSafely(execution.trace, state, 'success')
         if (!input.abortSignal?.aborted) {
             yield {
@@ -415,9 +428,6 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             }
         }
     } catch (error) {
-        await persistAssistantMessage(execution.conversation.id, state).catch((persistError) => {
-            console.error('[chat] Failed to persist partial streaming response', persistError)
-        })
         const normalizedError = normalizeError(error)
         await finishTraceSafely(
             execution.trace,
@@ -440,7 +450,7 @@ export async function getChatHistory(userId: string, sessionId: string) {
     const items = await db.select()
         .from(messages)
         .where(eq(messages.conversationId, conversation.id))
-        .orderBy(asc(messages.createdAt))
+        .orderBy(asc(messages.createdAt), asc(messages.role))
 
     return items.map((message) => ({
         id: message.id,
