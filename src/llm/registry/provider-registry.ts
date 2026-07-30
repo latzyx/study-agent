@@ -1,40 +1,32 @@
-import {createProviderRegistry} from "ai";
-import {createOpenAI} from "@ai-sdk/openai";
-import {createAnthropic} from "@ai-sdk/anthropic";
-import {createOpenAICompatible} from "@ai-sdk/openai-compatible";
+import {createProviderRegistry} from 'ai'
+import {createOpenAI} from '@ai-sdk/openai'
+import {createAnthropic} from '@ai-sdk/anthropic'
+import {createOpenAICompatible} from '@ai-sdk/openai-compatible'
+import {env} from '../../config/env.js'
 
 const openai = createOpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+    apiKey: env.providers.openaiApiKey,
+})
 
 const anthropic = createAnthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-});
+    apiKey: env.providers.anthropicApiKey,
+})
 
 const lmstudio = createOpenAICompatible({
-    name: "lmstudio",
-    baseURL:
-        process.env.LM_STUDIO_BASE_URL ??
-        "http://127.0.0.1:1234/v1",
-    apiKey:
-        process.env.LM_STUDIO_API_KEY ??
-        "lm-studio",
-});
+    name: 'lmstudio',
+    baseURL: env.providers.lmStudioBaseUrl,
+    apiKey: env.providers.lmStudioApiKey,
+})
 
 const vllm = createOpenAICompatible({
-    name: "vllm",
-    baseURL:
-        process.env.VLLM_BASE_URL ??
-        "http://127.0.0.1:8000/v1",
-    apiKey:
-        process.env.VLLM_API_KEY ??
-        "local-vllm",
-});
+    name: 'vllm',
+    baseURL: env.providers.vllmBaseUrl,
+    apiKey: env.providers.vllmApiKey,
+})
 
-export const providerRegistry =
-    createProviderRegistry({
-        openai,
-        anthropic,
-        lmstudio,
-        vllm,
-    });
+export const providerRegistry = createProviderRegistry({
+    openai,
+    anthropic,
+    lmstudio,
+    vllm,
+})
