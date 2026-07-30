@@ -18,7 +18,7 @@ function jsonError(
 
 export const errorHandlerPlugin = new Elysia({name: 'error-handler'})
     .use(requestContextPlugin)
-    .onError(({code, error, request, requestId}) => {
+    .onError({as: 'global'}, ({code, error, request, requestId}) => {
         if (error instanceof ApiError) {
             return jsonError(
                 error.status,
