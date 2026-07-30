@@ -1,28 +1,6 @@
 import {Elysia} from 'elysia'
 import {jwt} from '@elysiajs/jwt'
-
-function resolveJwtSecret(): string {
-    const secret = process.env.JWT_SECRET?.trim()
-    if (secret) return secret
-
-    if (process.env.NODE_ENV === 'production') {
-        throw new Error('JWT_SECRET must be configured in production')
-    }
-
-    console.warn('[auth] JWT_SECRET is not configured; using a development-only secret')
-    return 'study-agent-dev-secret-change-me'
-}
-
-function parseCsv(value?: string): Set<string> {
-    return new Set(
-        (value ?? '')
-            .split(',')
-            .map((item) => item.trim())
-            .filter(Boolean),
-    )
-}
-
-export const JWT_SECRET = resolveJwtSecret()
+import {env} from '../../config/env.js'
 
 export interface AccessTokenPayload {
     sub: string
@@ -34,10 +12,9 @@ interface JwtVerifier {
 }
 
 function resolveBearerToken(authorization?: string): string | null {
-    if (!authorization?.startsWith('Bearer ')) return null
-
-    const token = authorization.slice('Bearer '.length).trim()
-    return token.length > 0 ? token : null
+    const match = authorization?.match(/^Bearer\s+(.+)$/i)
+    const token = match?.[1]?.trim()
+    return token ? token : null
 }
 
 export async function authenticateAccessToken(
@@ -57,11 +34,8 @@ export async function authenticateAccessToken(
 }
 
 export function hasAdminAccess(user: AccessTokenPayload): boolean {
-    const adminUserIds = parseCsv(process.env.ADMIN_USER_IDS)
-    const adminUsernames = parseCsv(process.env.ADMIN_USERNAMES)
-
-    return adminUserIds.has(user.sub)
-        || (typeof user.username === 'string' && adminUsernames.has(user.username))
+    return env.auth.adminUserIds.has(user.sub)
+        || (typeof user.username === 'string' && env.auth.adminUsernames.has(user.username))
 }
 
 export function unauthorizedResponse(): Response {
@@ -79,9 +53,7 @@ export function forbiddenResponse(message = 'Insufficient permissions'): Respons
 }
 
 export const authPlugin = new Elysia({name: 'auth-plugin'})
-    .use(
-        jwt({
-            name: 'JWT',
-            secret: JWT_SECRET,
-        }),
-    )
+    .use(jwt({
+        name: 'JWT',
+        secret: env.auth.jwtSecret,
+    }))
