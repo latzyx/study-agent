@@ -110,7 +110,7 @@ export class AISDKProviderAdapter implements LLMProvider {
 
         try {
             for await (const event of result.fullStream) {
-                if (event.type === 'text') {
+                if (event.type === 'text-delta') {
                     yield {type: 'text-delta', text: event.text}
                 } else if (event.type === 'tool-call') {
                     yield {
