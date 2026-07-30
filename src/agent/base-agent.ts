@@ -3,6 +3,15 @@ import type {LLMProvider, LLMToolCall, LLMUsage} from '../llm/domain/llm-provide
 import type {Tool} from '../tools/domain/tool'
 import type {ToolRegistry} from '../tools/registry/tool-registry'
 
+function addUsage(total: LLMUsage, usage?: LLMUsage): void {
+    if (!usage) return
+    total.inputTokens = (total.inputTokens ?? 0) + (usage.inputTokens ?? 0)
+    total.outputTokens = (total.outputTokens ?? 0) + (usage.outputTokens ?? 0)
+    total.totalTokens = (total.totalTokens ?? 0) + (
+        usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)
+    )
+}
+
 export abstract class BaseAgent implements Agent {
     private toolsRegistered = false
 
@@ -36,6 +45,7 @@ export abstract class BaseAgent implements Agent {
         }))
         const maxSteps = this.config.maxSteps ?? 5
         const model = this.config.modelId ?? this.config.modelProfile
+        const totalUsage: LLMUsage = {}
 
         for (let step = 1; step <= maxSteps; step++) {
             const pendingToolCalls: LLMToolCall[] = []
@@ -51,13 +61,13 @@ export abstract class BaseAgent implements Agent {
             })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
-                    yield {type: 'text-delta', text: event.text}
+                    yield {type: 'text-delta', stepNumber: step, text: event.text}
                     continue
                 }
 
                 if (event.type === 'tool-call') {
                     pendingToolCalls.push(event.toolCall)
-                    yield {type: 'tool-call', toolCall: event.toolCall}
+                    yield {type: 'tool-call', stepNumber: step, toolCall: event.toolCall}
                     continue
                 }
 
@@ -72,13 +82,15 @@ export abstract class BaseAgent implements Agent {
                 }
 
                 if (event.type === 'error') {
-                    yield {type: 'error', error: event.error}
+                    yield {type: 'error', stepNumber: step, error: event.error}
                     return
                 }
             }
 
+            addUsage(totalUsage, usage)
+
             if (pendingToolCalls.length === 0) {
-                yield {type: 'finish', usage}
+                yield {type: 'finish', stepNumber: step, usage: totalUsage}
                 return
             }
 
@@ -103,6 +115,7 @@ export abstract class BaseAgent implements Agent {
                     )
                     yield {
                         type: 'tool-result',
+                        stepNumber: step,
                         toolResult: {
                             toolCallId: toolCall.id,
                             name: toolCall.name,
@@ -123,6 +136,7 @@ export abstract class BaseAgent implements Agent {
                     )
                     yield {
                         type: 'error',
+                        stepNumber: step,
                         error: normalizedError,
                     }
                     return
@@ -132,6 +146,7 @@ export abstract class BaseAgent implements Agent {
 
         yield {
             type: 'error',
+            stepNumber: maxSteps,
             error: new Error(`Agent exceeded max steps: ${maxSteps}`),
         }
     }
