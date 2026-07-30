@@ -38,6 +38,7 @@ export interface AgentRunOptions {
 
 export interface AgentEvent {
     type: 'text-delta' | 'tool-call' | 'tool-result' | 'error' | 'finish'
+    stepNumber?: number
     text?: string
     toolCall?: {
         id: string
