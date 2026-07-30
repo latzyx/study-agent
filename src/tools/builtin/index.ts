@@ -26,7 +26,15 @@ export function findUnknownBuiltinTools(names: readonly string[]): string[] {
 }
 
 export function resolveBuiltinTools(names: readonly string[]): Tool[] {
-    return [...new Set(names)]
-        .map((name) => resolveBuiltinTool(name))
-        .filter((tool): tool is Tool => Boolean(tool))
+    const uniqueNames = [...new Set(names)]
+    const unknown = findUnknownBuiltinTools(uniqueNames)
+    if (unknown.length > 0) {
+        throw new Error(`Unknown builtin tools: ${unknown.join(', ')}`)
+    }
+
+    return uniqueNames.map((name) => {
+        const tool = resolveBuiltinTool(name)
+        if (!tool) throw new Error(`Builtin tool disappeared during resolution: ${name}`)
+        return tool
+    })
 }
