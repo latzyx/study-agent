@@ -21,6 +21,8 @@ interface Aggregate {
     sources: Set<string>
 }
 
+const agentKeys = new Set<BuiltinAgentKey>(['general', 'math', 'time'])
+
 function clamp(value: number): number {
     return Math.max(0, Math.min(1, value))
 }
@@ -74,6 +76,13 @@ export class IntentRouter {
 
             const signals = await classifier.classify(normalizedInput, context)
             for (const signal of signals) {
+                if (!agentKeys.has(signal.agentKey)) {
+                    throw new Error(`Intent classifier returned an unknown agent: ${signal.agentKey}`)
+                }
+                if (!Number.isFinite(signal.score)) {
+                    throw new Error(`Intent classifier returned an invalid score: ${classifier.name}`)
+                }
+
                 const aggregate = aggregates.get(signal.agentKey) ?? {
                     weightedScore: 0,
                     totalWeight: 0,
