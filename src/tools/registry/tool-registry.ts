@@ -6,15 +6,9 @@ export class ToolRegistry {
         new Map<string, Tool>();
 
     register(tool: Tool): void {
+        // 如果工具已存在，跳过注册
         if (this.tools.has(tool.name)) {
-            // Skip if same tool is already registered
-            const existing = this.tools.get(tool.name);
-            if (existing === tool) {
-                return;
-            }
-            throw new Error(
-                `Tool already registered: ${tool.name}`,
-            );
+            return;
         }
 
         this.tools.set(tool.name, tool);
@@ -37,8 +31,10 @@ export class ToolRegistry {
     ): Promise<unknown> {
         const tool = this.get(call.name);
 
-        const input =
-            tool.inputSchema.parse(call.input);
+        // 确保 input 不是空对象
+        const input = call.input && Object.keys(call.input).length > 0
+            ? tool.inputSchema.parse(call.input)
+            : call.input;
 
         return tool.execute(input, {});
     }

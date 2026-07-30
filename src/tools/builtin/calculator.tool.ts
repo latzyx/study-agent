@@ -11,7 +11,7 @@ export type CalculatorInput = z.infer<typeof calculatorSchema>;
 
 export const calculatorTool: ToolWithAI<CalculatorInput> = {
     name: "calculator",
-    description: "执行两个数字的基础运算",
+    description: "执行两个数字的基础运算。必须使用参数: a(第一个数字), b(第二个数字), op(运算符: add/subtract/multiply/divide)",
     inputSchema: calculatorSchema,
     
     execute: async ({ a, b, op }, options) => {
