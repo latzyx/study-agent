@@ -92,7 +92,6 @@ export async function beginChatRequest(
         userId: input.userId,
         idempotencyKey,
         requestHash: hash,
-        agentId: input.agentId,
         sessionId: input.sessionId?.trim() || null,
         status: 'running',
     }).onConflictDoNothing({
@@ -142,37 +141,20 @@ export async function beginChatRequest(
 
 export async function attachChatRequestExecution(input: {
     requestRecordId?: string
+    agentId: string
     conversationId: string
     sessionId: string
     traceId?: string
 }): Promise<void> {
     if (!input.requestRecordId) return
     await db.update(chatRequests).set({
+        agentId: input.agentId,
         conversationId: input.conversationId,
         sessionId: input.sessionId,
         traceId: input.traceId,
         updatedAt: new Date(),
     }).where(and(
         eq(chatRequests.id, input.requestRecordId),
-        eq(chatRequests.status, 'running'),
-    ))
-}
-
-export async function completeChatRequest(
-    requestRecordId: string | undefined,
-    result: IdempotentChatResult,
-): Promise<void> {
-    if (!requestRecordId) return
-    await db.update(chatRequests).set({
-        status: 'success',
-        result: result as unknown as Record<string, unknown>,
-        traceId: result.traceId,
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-        errorCode: null,
-        errorMessage: null,
-    }).where(and(
-        eq(chatRequests.id, requestRecordId),
         eq(chatRequests.status, 'running'),
     ))
 }
