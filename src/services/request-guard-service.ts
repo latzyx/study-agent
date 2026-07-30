@@ -1,3 +1,4 @@
+import {resolveClientIp} from '../api/http/client-ip.js'
 import {env} from '../config/env.js'
 import {
     enforceRateLimit,
@@ -17,18 +18,9 @@ const registerLimiter = createLimiter(env.limits.authRegister)
 const refreshLimiter = createLimiter(env.limits.authRefresh)
 const chatLimiter = createLimiter(env.limits.chat)
 
-function forwardedClientIp(request: Request): string | null {
-    if (!env.server.trustProxyHeaders) return null
-
-    return request.headers.get('cf-connecting-ip')?.trim()
-        || request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-        || request.headers.get('x-real-ip')?.trim()
-        || null
-}
-
 function requestFingerprint(request: Request): string {
-    const ip = forwardedClientIp(request)
-    if (ip) return `ip:${ip.slice(0, 64)}`
+    const ip = resolveClientIp(request.headers)
+    if (ip) return `ip:${ip}`
 
     const userAgent = request.headers.get('user-agent')?.slice(0, 160) ?? 'unknown-agent'
     const language = request.headers.get('accept-language')?.slice(0, 80) ?? 'unknown-language'
