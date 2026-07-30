@@ -344,6 +344,8 @@ bun run build
 PostgreSQL 16: db:migrate → db:migrate → db:verify
 ```
 
+PR 的 mergeable 状态由 GitHub 根据当前 base、head 和检查结果动态计算，不能替代 CI 结论。
+
 ## 安全约束
 
 - 业务接口仅接受 Bearer Token。
