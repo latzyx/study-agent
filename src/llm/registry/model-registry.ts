@@ -5,8 +5,11 @@ export type ModelProfile = 'fast' | 'general' | 'reasoning' | 'vision' | 'fallba
 const modelProfiles: Readonly<Record<ModelProfile, string>> = env.models
 
 export function resolveModel(profile: ModelProfile): string {
-    const model = modelProfiles[profile]
+    const model = modelProfiles[profile]?.trim()
     if (!model) throw new Error(`Model profile not configured: ${profile}`)
+    if (!model.includes(':')) {
+        throw new Error(`Model profile must resolve to a provider-qualified id: ${profile}`)
+    }
     return model
 }
 
