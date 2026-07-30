@@ -83,7 +83,11 @@ function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent 
         tools: selectedTools,
     }
 
-    return new BaseAgent(config, new AISDKProviderAdapter(resolveLanguageModel), new ToolRegistry())
+    return new (class extends BaseAgent {})(
+        config,
+        new AISDKProviderAdapter(resolveLanguageModel),
+        new ToolRegistry(),
+    )
 }
 
 async function findConversationBySession(userId: string, sessionId: string) {
@@ -117,9 +121,7 @@ async function getOrCreateConversation(userId: string, agentId: string, sessionI
 
     const [created] = await db.insert(conversations)
         .values({userId, agentId, sessionId: resolvedSessionId})
-        .onConflictDoNothing({
-            target: [conversations.userId, conversations.sessionId],
-        })
+        .onConflictDoNothing({target: [conversations.userId, conversations.sessionId]})
         .returning()
 
     if (created) return created
@@ -167,9 +169,7 @@ function applyAgentEvent(
 
     if (event.type === 'tool-result' && event.toolResult) {
         const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
-        if (!call) {
-            throw new Error(`Tool result has no matching call: ${event.toolResult.toolCallId}`)
-        }
+        if (!call) throw new Error(`Tool result has no matching call: ${event.toolResult.toolCallId}`)
         call.result = event.toolResult.result
     }
 }
@@ -179,13 +179,7 @@ async function persistConversationTurn(
     userMessage: string,
     state: {reply: string; toolCalls: ToolCallRecord[]},
 ): Promise<void> {
-    const rows = buildTurnMessageRows(
-        conversationId,
-        userMessage,
-        state.reply,
-        state.toolCalls,
-    )
-
+    const rows = buildTurnMessageRows(conversationId, userMessage, state.reply, state.toolCalls)
     await db.transaction(async (tx) => {
         await tx.insert(messages).values(rows)
     })
@@ -193,27 +187,20 @@ async function persistConversationTurn(
 
 async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
     const normalizedMessage = input.message.trim()
-    if (!normalizedMessage) {
-        throw createApiError(400, 'EMPTY_MESSAGE', 'Message cannot be empty')
-    }
+    if (!normalizedMessage) throw createApiError(400, 'EMPTY_MESSAGE', 'Message cannot be empty')
     if (input.abortSignal?.aborted) {
         throw createApiError(499, 'REQUEST_ABORTED', 'Request was aborted before execution')
     }
 
     const agentRow = await findUserAgent(input.userId, input.agentId)
-    const conversation = await getOrCreateConversation(
-        input.userId,
-        input.agentId,
-        input.sessionId,
-    )
+    const conversation = await getOrCreateConversation(input.userId, input.agentId, input.sessionId)
     const lease = acquireChatExecutionLease(input.userId, conversation.sessionId)
 
     try {
-        const history = await loadConversationHistory(conversation.id)
         return {
             agent: createAgentFromConfig(agentRow),
             conversation,
-            history,
+            history: await loadConversationHistory(conversation.id),
             lease,
         }
     } catch (error) {
@@ -230,18 +217,11 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
             abortSignal: input.abortSignal,
-            toolContext: {
-                userId: input.userId,
-                sessionId: execution.conversation.sessionId,
-            },
+            toolContext: {userId: input.userId, sessionId: execution.conversation.sessionId},
         })) {
             applyAgentEvent(event, state)
             if (event.type === 'error') {
-                throw createApiError(
-                    502,
-                    'AGENT_EXECUTION_FAILED',
-                    publicExecutionError(event.error),
-                )
+                throw createApiError(502, 'AGENT_EXECUTION_FAILED', publicExecutionError(event.error))
             }
         }
 
@@ -268,22 +248,14 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
             abortSignal: input.abortSignal,
-            toolContext: {
-                userId: input.userId,
-                sessionId: execution.conversation.sessionId,
-            },
+            toolContext: {userId: input.userId, sessionId: execution.conversation.sessionId},
         })) {
             applyAgentEvent(event, state)
 
             if (event.type === 'text-delta') {
                 yield {type: 'text-delta', content: event.text ?? ''}
             } else if (event.type === 'tool-call' && event.toolCall) {
-                yield {
-                    type: 'tool-call',
-                    id: event.toolCall.id,
-                    name: event.toolCall.name,
-                    args: event.toolCall.input,
-                }
+                yield {type: 'tool-call', id: event.toolCall.id, name: event.toolCall.name, args: event.toolCall.input}
             } else if (event.type === 'tool-result' && event.toolResult) {
                 yield {
                     type: 'tool-result',
@@ -294,11 +266,7 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             } else if (event.type === 'finish') {
                 yield {type: 'finish', usage: event.usage}
             } else if (event.type === 'error') {
-                throw createApiError(
-                    502,
-                    'AGENT_EXECUTION_FAILED',
-                    publicExecutionError(event.error),
-                )
+                throw createApiError(502, 'AGENT_EXECUTION_FAILED', publicExecutionError(event.error))
             }
         }
 
@@ -313,9 +281,7 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
 
 export async function getChatHistory(userId: string, sessionId: string) {
     const conversation = await findConversationBySession(userId, sessionId)
-    if (!conversation) {
-        throw createApiError(404, 'SESSION_NOT_FOUND', 'Session not found')
-    }
+    if (!conversation) throw createApiError(404, 'SESSION_NOT_FOUND', 'Session not found')
 
     const items = await db.select()
         .from(messages)
