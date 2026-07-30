@@ -8,7 +8,7 @@ import {agents, conversations, messages} from '../db/schema.js'
 import type {LLMMessage, LLMUsage} from '../llm/domain/llm-provider.js'
 import {AISDKProviderAdapter} from '../llm/providers/ai-sdk-provider.js'
 import {resolveModel} from '../llm/registry/model-registry.js'
-import {providerRegistry} from '../llm/registry/provider-registry.js'
+import {resolveLanguageModel} from '../llm/registry/provider-registry.js'
 import {resolveBuiltinTools} from '../tools/builtin/index.js'
 import {ToolRegistry} from '../tools/registry/tool-registry.js'
 import {findUserAgent} from './agent-service.js'
@@ -68,13 +68,12 @@ function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent 
         modelId,
         maxSteps: agentRow.maxSteps,
     }
-    const model = providerRegistry.languageModel(modelId as any)
 
     return new (class extends BaseAgent {
         getTools() {
             return selectedTools
         }
-    })(config, new AISDKProviderAdapter(model), new ToolRegistry())
+    })(config, new AISDKProviderAdapter(resolveLanguageModel), new ToolRegistry())
 }
 
 async function findConversationBySession(userId: string, sessionId: string) {
