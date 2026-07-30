@@ -40,6 +40,10 @@ export const updateAgentBody = t.Object({
     tools: t.Optional(agentTools),
 })
 
+export const rollbackAgentBody = t.Object({
+    targetVersion: t.Number({minimum: 1}),
+})
+
 export const agentResponse = t.Object({
     id: t.String(),
     name: t.String(),
@@ -48,6 +52,7 @@ export const agentResponse = t.Object({
     modelProfile: t.String(),
     maxSteps: t.Number(),
     tools: t.Array(t.String()),
+    version: t.Number(),
     createdBy: t.Optional(t.String()),
     createdAt: t.String(),
     updatedAt: t.String(),

@@ -29,12 +29,21 @@ const rawEnvSchema = z.object({
     CHAT_MAX_CONCURRENT_PER_SESSION: z.coerce.number().int().min(1).max(20).default(1),
     RATE_LIMIT_MAX_KEYS: z.coerce.number().int().min(100).max(1_000_000).default(10_000),
 
+    BACKGROUND_TASK_MAX_PENDING: z.coerce.number().int().min(10).max(100_000).default(1000),
+    BACKGROUND_TASK_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5000),
+
     DATABASE_URL: z.string().trim().min(1).optional(),
     DB_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
     DB_IDLE_TIMEOUT_SECONDS: z.coerce.number().int().min(0).max(3600).default(20),
     DB_CONNECT_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(300).default(10),
     DB_SHUTDOWN_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(60).default(5),
     HEALTHCHECK_DB_TIMEOUT_MS: z.coerce.number().int().min(100).max(30000).default(1500),
+
+    AI_TRACE_ENABLED: booleanEnv.default(true),
+    AI_TRACE_RECORD_INPUTS: booleanEnv.optional(),
+    AI_TRACE_RECORD_OUTPUTS: booleanEnv.optional(),
+    AI_TRACE_MAX_SNAPSHOT_CHARS: z.coerce.number().int().min(1000).max(1_000_000).default(20_000),
+    AI_TRACE_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
 
     UPLOAD_DIR: z.string().trim().min(1).default('uploads'),
     MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
@@ -44,6 +53,11 @@ const rawEnvSchema = z.object({
     LLM_MODEL_REASONING: z.string().trim().min(1).default('openai:gpt-5-mini'),
     LLM_MODEL_VISION: z.string().trim().min(1).default('openai:gpt-5-mini'),
     LLM_MODEL_FALLBACK: z.string().trim().min(1).default('anthropic:claude-sonnet-4-5'),
+    LLM_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30 * 60 * 1000).default(120_000),
+    LLM_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+    LLM_RETRY_BASE_DELAY_MS: z.coerce.number().int().min(10).max(10_000).default(250),
+    LLM_CIRCUIT_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(100).default(5),
+    LLM_CIRCUIT_RESET_MS: z.coerce.number().int().min(1000).max(60 * 60 * 1000).default(30_000),
 
     OPENAI_API_KEY: z.string().optional(),
     ANTHROPIC_API_KEY: z.string().optional(),
@@ -84,6 +98,7 @@ function parseEnvironment(source: NodeJS.ProcessEnv): RawEnv {
 
 const raw = parseEnvironment(process.env)
 const developmentJwtSecret = 'study-agent-development-secret-change-me'
+const recordTracePayloadsByDefault = raw.NODE_ENV !== 'production'
 
 export const env = Object.freeze({
     nodeEnv: raw.NODE_ENV,
@@ -125,6 +140,10 @@ export const env = Object.freeze({
             maxConcurrentPerSession: raw.CHAT_MAX_CONCURRENT_PER_SESSION,
         },
     },
+    backgroundTasks: {
+        maxPending: raw.BACKGROUND_TASK_MAX_PENDING,
+        shutdownTimeoutMs: raw.BACKGROUND_TASK_SHUTDOWN_TIMEOUT_MS,
+    },
     database: {
         url: raw.DATABASE_URL,
         maxConnections: raw.DB_MAX_CONNECTIONS,
@@ -132,6 +151,13 @@ export const env = Object.freeze({
         connectTimeoutSeconds: raw.DB_CONNECT_TIMEOUT_SECONDS,
         shutdownTimeoutSeconds: raw.DB_SHUTDOWN_TIMEOUT_SECONDS,
         healthcheckTimeoutMs: raw.HEALTHCHECK_DB_TIMEOUT_MS,
+    },
+    tracing: {
+        enabled: raw.AI_TRACE_ENABLED,
+        recordInputs: raw.AI_TRACE_RECORD_INPUTS ?? recordTracePayloadsByDefault,
+        recordOutputs: raw.AI_TRACE_RECORD_OUTPUTS ?? recordTracePayloadsByDefault,
+        maxSnapshotChars: raw.AI_TRACE_MAX_SNAPSHOT_CHARS,
+        retentionDays: raw.AI_TRACE_RETENTION_DAYS,
     },
     uploads: {
         directory: raw.UPLOAD_DIR,
@@ -145,6 +171,11 @@ export const env = Object.freeze({
         fallback: raw.LLM_MODEL_FALLBACK,
     },
     providers: {
+        requestTimeoutMs: raw.LLM_REQUEST_TIMEOUT_MS,
+        maxRetries: raw.LLM_MAX_RETRIES,
+        retryBaseDelayMs: raw.LLM_RETRY_BASE_DELAY_MS,
+        circuitFailureThreshold: raw.LLM_CIRCUIT_FAILURE_THRESHOLD,
+        circuitResetMs: raw.LLM_CIRCUIT_RESET_MS,
         openaiApiKey: raw.OPENAI_API_KEY,
         anthropicApiKey: raw.ANTHROPIC_API_KEY,
         lmStudioBaseUrl: raw.LM_STUDIO_BASE_URL,

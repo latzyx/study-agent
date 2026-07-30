@@ -1,6 +1,6 @@
 import {Elysia} from 'elysia'
 import {env} from '../../config/env.js'
-import {checkDatabaseConnection} from '../../db/index.js'
+import {checkDatabaseReadiness} from '../../db/index.js'
 
 function serviceStatus() {
     return {
@@ -36,13 +36,16 @@ export const healthRoutes = new Elysia({prefix: '/health'})
         async () => {
             try {
                 await withTimeout(
-                    checkDatabaseConnection(),
+                    checkDatabaseReadiness(),
                     env.database.healthcheckTimeoutMs,
                 )
 
                 return {
                     ...serviceStatus(),
-                    dependencies: {database: 'ok' as const},
+                    dependencies: {
+                        database: 'ok' as const,
+                        schema: 'current' as const,
+                    },
                 }
             } catch (error) {
                 console.error('[health] Database readiness check failed', error)
@@ -50,12 +53,15 @@ export const healthRoutes = new Elysia({prefix: '/health'})
                 return Response.json({
                     status: 'unavailable',
                     timestamp: new Date().toISOString(),
-                    dependencies: {database: 'unavailable'},
+                    dependencies: {
+                        database: 'unavailable',
+                        schema: 'unknown',
+                    },
                     ...(!env.isProduction && {
                         error: error instanceof Error ? error.message : String(error),
                     }),
                 }, {status: 503})
             }
         },
-        {detail: {summary: 'Service readiness check'}},
+        {detail: {summary: 'Service readiness and schema check'}},
     )

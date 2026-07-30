@@ -3,13 +3,21 @@ import {
     createUserAgent,
     deleteUserAgent,
     findUserAgent,
+    listAgentVersions,
     listUserAgents,
+    rollbackUserAgent,
     serializeAgent,
     updateUserAgent,
 } from '../../services/agent-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
 import {authPlugin, requireAccessToken} from '../middleware/auth.js'
-import {agentListQuery, createAgentBody, updateAgentBody} from '../schemas/agent.js'
+import {getRequestId} from '../middleware/request-context.js'
+import {
+    agentListQuery,
+    createAgentBody,
+    rollbackAgentBody,
+    updateAgentBody,
+} from '../schemas/agent.js'
 
 export const agentRoutes = new Elysia({prefix: '/agents'})
     .use(authPlugin)
@@ -38,6 +46,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await requireAccessToken(JWT, headers.authorization)
             const agent = await createUserAgent({
                 userId: user.sub,
+                requestId: getRequestId(request),
                 name: body.name,
                 description: body.description,
                 systemPrompt: body.systemPrompt,
@@ -53,6 +62,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
                 resourceId: agent.id,
                 details: {
                     name: agent.name,
+                    version: agent.version,
                     modelProfile: agent.modelProfile,
                     tools: agent.tools,
                 },
@@ -64,6 +74,70 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
         {
             body: createAgentBody,
             detail: {summary: 'Create a new agent', security: [{BearerAuth: []}]},
+        },
+    )
+    .get(
+        '/:id/versions',
+        async ({params, query, JWT, headers}) => {
+            const user = await requireAccessToken(JWT, headers.authorization)
+            const page = query.page ?? 1
+            const pageSize = query.pageSize ?? 20
+            const result = await listAgentVersions({
+                userId: user.sub,
+                agentId: params.id,
+                page,
+                pageSize,
+            })
+
+            return {
+                success: true,
+                data: result.items,
+                pagination: {page, pageSize, total: result.total},
+            }
+        },
+        {
+            params: t.Object({id: t.String({format: 'uuid'})}),
+            query: agentListQuery,
+            detail: {summary: 'List agent versions', security: [{BearerAuth: []}]},
+        },
+    )
+    .post(
+        '/:id/rollback',
+        async ({params, body, JWT, headers, request}) => {
+            const user = await requireAccessToken(JWT, headers.authorization)
+            const result = await rollbackUserAgent({
+                userId: user.sub,
+                requestId: getRequestId(request),
+                agentId: params.id,
+                targetVersion: body.targetVersion,
+            })
+
+            await recordAuditLog({
+                userId: user.sub,
+                action: 'agent.rollback',
+                resourceType: 'agent',
+                resourceId: result.agent.id,
+                details: {
+                    newVersion: result.agent.version,
+                    rolledBackFromVersion: result.rolledBackFromVersion,
+                    restoredFromVersion: result.restoredFromVersion,
+                },
+                request,
+            })
+
+            return {
+                success: true,
+                data: {
+                    agent: serializeAgent(result.agent),
+                    rolledBackFromVersion: result.rolledBackFromVersion,
+                    restoredFromVersion: result.restoredFromVersion,
+                },
+            }
+        },
+        {
+            params: t.Object({id: t.String({format: 'uuid'})}),
+            body: rollbackAgentBody,
+            detail: {summary: 'Rollback an agent configuration', security: [{BearerAuth: []}]},
         },
     )
     .get(
@@ -84,6 +158,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await requireAccessToken(JWT, headers.authorization)
             const result = await updateUserAgent({
                 userId: user.sub,
+                requestId: getRequestId(request),
                 agentId: params.id,
                 name: body.name,
                 description: body.description,
@@ -98,7 +173,10 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
                 action: 'agent.update',
                 resourceType: 'agent',
                 resourceId: result.agent.id,
-                details: {changedFields: result.changedFields},
+                details: {
+                    changedFields: result.changedFields,
+                    version: result.agent.version,
+                },
                 request,
             })
 
@@ -120,7 +198,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
                 action: 'agent.delete',
                 resourceType: 'agent',
                 resourceId: deleted.id,
-                details: {name: deleted.name},
+                details: {name: deleted.name, version: deleted.version},
                 request,
             })
 

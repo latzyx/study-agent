@@ -17,6 +17,7 @@
     "db:check": "bun run src/db/check-migrations.ts",
     "db:migrate": "bun run src/db/migrate.ts",
     "db:verify": "bun run src/db/verify-migrations.ts",
+    "db:verify:traceability": "bun run src/db/verify-traceability.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },
