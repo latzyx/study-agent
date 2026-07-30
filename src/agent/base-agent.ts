@@ -1,4 +1,4 @@
-import type {Agent, AgentConfig, AgentEvent} from './types/agent'
+import type {Agent, AgentConfig, AgentEvent, AgentRunOptions} from './types/agent'
 import type {Tool} from '../tools/domain/tool'
 import type {LLMProvider} from '../llm/domain/llm-provider'
 import type {ToolRegistry} from '../tools/registry/tool-registry'
@@ -18,9 +18,10 @@ export abstract class BaseAgent implements Agent {
         for (const tool of this.getTools()) this.toolRegistry.register(tool)
     }
 
-    async *run(input: string): AsyncGenerator<AgentEvent> {
+    async *run(input: string, options: AgentRunOptions = {}): AsyncGenerator<AgentEvent> {
         const messages = [
             {role: 'system' as const, content: this.config.systemPrompt},
+            ...(options.history ?? []).filter((message) => message.role !== 'system'),
             {role: 'user' as const, content: input},
         ]
         const tools = this.toolRegistry.list().map((tool) => ({
@@ -35,7 +36,12 @@ export abstract class BaseAgent implements Agent {
             let hasToolCall = false
             let fullText = ''
 
-            for await (const event of this.llmProvider.stream({model, messages, tools})) {
+            for await (const event of this.llmProvider.stream({
+                model,
+                messages,
+                tools,
+                abortSignal: options.abortSignal,
+            })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
                     yield {type: 'text-delta', text: event.text}
@@ -47,7 +53,10 @@ export abstract class BaseAgent implements Agent {
                     yield {type: 'tool-call', toolCall: event.toolCall}
 
                     try {
-                        const result = await this.toolRegistry.execute(event.toolCall)
+                        const result = await this.toolRegistry.execute(event.toolCall, {
+                            ...options.toolContext,
+                            abortSignal: options.abortSignal,
+                        })
                         yield {
                             type: 'tool-result',
                             toolResult: {
