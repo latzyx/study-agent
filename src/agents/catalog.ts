@@ -49,6 +49,23 @@ export function getToolOwner(toolName: string): BuiltinAgentKey | undefined {
     return toolOwnerMap.get(toolName)
 }
 
+export function inferAgentKeyFromTools(toolNames: readonly string[]): BuiltinAgentKey {
+    const normalizedNames = [...new Set(toolNames)]
+    if (normalizedNames.length === 0) return 'general'
+
+    const unknown = normalizedNames.filter((name) => !toolOwnerMap.has(name))
+    if (unknown.length > 0) {
+        throw new Error(`Unknown builtin tools: ${unknown.join(', ')}`)
+    }
+
+    const owners = [...new Set(normalizedNames.map((name) => toolOwnerMap.get(name)!))]
+    if (owners.length !== 1) {
+        throw new Error(`Tools belong to different agents: ${owners.join(', ')}`)
+    }
+
+    return owners[0]!
+}
+
 export function listBuiltinTools(): Tool[] {
     return [...toolMap.values()]
 }
