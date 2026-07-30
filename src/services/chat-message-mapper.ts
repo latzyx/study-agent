@@ -25,11 +25,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseAssistantToolCalls(value: unknown): LLMToolCall[] {
     if (!Array.isArray(value)) return []
 
+    const seen = new Set<string>()
     return value.flatMap((item) => {
         if (!isRecord(item)) return []
         const id = typeof item.id === 'string' ? item.id.trim() : ''
         const name = typeof item.name === 'string' ? item.name.trim() : ''
-        if (!id || !name) return []
+        if (!id || !name || seen.has(id)) return []
+        seen.add(id)
         return [{id, name, input: item.args}]
     })
 }
@@ -42,12 +44,22 @@ function parseToolMetadata(value: unknown): StoredToolMetadata | undefined {
     return {toolCallId, name}
 }
 
+export function trimStoredHistoryToTurnBoundary(
+    rows: readonly StoredChatMessage[],
+): StoredChatMessage[] {
+    const firstUserIndex = rows.findIndex((row) => row.role === 'user')
+    return firstUserIndex < 0 ? [] : rows.slice(firstUserIndex)
+}
+
 export function restoreLLMMessages(rows: readonly StoredChatMessage[]): LLMMessage[] {
     const restored: LLMMessage[] = []
+    const pendingToolCalls = new Map<string, string>()
 
-    for (const row of rows) {
+    for (const row of trimStoredHistoryToTurnBoundary(rows)) {
         if (row.role === 'assistant') {
+            pendingToolCalls.clear()
             const toolCalls = parseAssistantToolCalls(row.toolCalls)
+            for (const toolCall of toolCalls) pendingToolCalls.set(toolCall.id, toolCall.name)
             if (!row.content?.trim() && toolCalls.length === 0) continue
             restored.push({
                 role: 'assistant',
@@ -60,6 +72,8 @@ export function restoreLLMMessages(rows: readonly StoredChatMessage[]): LLMMessa
         if (row.role === 'tool') {
             const metadata = parseToolMetadata(row.toolCalls)
             if (!metadata || row.content === null) continue
+            if (pendingToolCalls.get(metadata.toolCallId) !== metadata.name) continue
+            pendingToolCalls.delete(metadata.toolCallId)
             restored.push({
                 role: 'tool',
                 content: row.content,
@@ -69,6 +83,7 @@ export function restoreLLMMessages(rows: readonly StoredChatMessage[]): LLMMessa
             continue
         }
 
+        pendingToolCalls.clear()
         if (!row.content?.trim()) continue
         restored.push({role: row.role, content: row.content})
     }
@@ -100,6 +115,12 @@ export function buildTurnMessageRows(
     assistantReply: string,
     toolCalls: readonly PersistedToolCall[],
 ) {
+    const normalizedUserMessage = userMessage.trim()
+    if (!normalizedUserMessage) throw new Error('Cannot persist an empty user message')
+    if (!assistantReply.trim() && toolCalls.length === 0) {
+        throw new Error('Cannot persist a turn without an assistant response')
+    }
+
     const rows: Array<{
         conversationId: string
         role: 'user' | 'assistant' | 'tool'
@@ -108,20 +129,18 @@ export function buildTurnMessageRows(
     }> = [{
         conversationId,
         role: 'user',
-        content: userMessage,
+        content: normalizedUserMessage,
         toolCalls: null,
     }]
 
-    if (assistantReply || toolCalls.length > 0) {
-        rows.push({
-            conversationId,
-            role: 'assistant',
-            content: assistantReply || null,
-            toolCalls: toolCalls.length > 0
-                ? toolCalls.map(({id, name, args}) => ({id, name, args}))
-                : null,
-        })
-    }
+    rows.push({
+        conversationId,
+        role: 'assistant',
+        content: assistantReply || null,
+        toolCalls: toolCalls.length > 0
+            ? toolCalls.map(({id, name, args}) => ({id, name, args}))
+            : null,
+    })
 
     for (const toolCall of toolCalls) {
         rows.push({
