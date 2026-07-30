@@ -1,8 +1,12 @@
 import {Elysia} from 'elysia'
-import {eq} from 'drizzle-orm'
-import {db} from '../../db/index.js'
-import {users} from '../../db/schema.js'
+import {authenticateUser, normalizedLoginEmail, registerUser} from '../../services/auth-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
+import {
+    enforceLoginRateLimit,
+    enforceRefreshRateLimit,
+    enforceRegisterRateLimit,
+    resetLoginRateLimit,
+} from '../../services/request-guard-service.js'
 import {
     issueTokenPair,
     revokeRefreshToken,
@@ -11,70 +15,53 @@ import {
 import {authPlugin} from '../middleware/auth.js'
 import {loginBody, refreshBody, registerBody} from '../schemas/auth.js'
 
-function errorResponse(status: number, code: string, message: string): Response {
-    return Response.json({success: false, error: {code, message}}, {status})
+function disableAuthResponseCaching(set: {headers: Record<string, string>}): void {
+    set.headers['cache-control'] = 'no-store'
+    set.headers.pragma = 'no-cache'
 }
 
 export const authRoutes = new Elysia({prefix: '/auth'})
     .use(authPlugin)
     .post(
         '/register',
-        // @ts-ignore - Elysia body type inference
-        async ({body, JWT, request}) => {
-            const email = body.email.trim().toLowerCase()
-            const username = body.username.trim()
-            const passwordHash = await Bun.password.hash(body.password)
+        async ({body, JWT, request, set}) => {
+            disableAuthResponseCaching(set)
+            const email = normalizedLoginEmail(body.email)
+            enforceRegisterRateLimit(request, email)
 
-            const [newUser] = await db.insert(users).values({
-                username,
-                email,
-                passwordHash,
-            })
-                .onConflictDoNothing()
-                .returning({id: users.id, username: users.username, email: users.email})
-
-            if (!newUser) {
-                return errorResponse(409, 'USER_EXISTS', 'Email or username is already registered')
-            }
-
-            const tokens = await issueTokenPair(JWT, newUser)
+            const user = await registerUser(body)
+            const tokens = await issueTokenPair(JWT, user)
             await recordAuditLog({
-                userId: newUser.id,
+                userId: user.id,
                 action: 'auth.register',
                 resourceType: 'user',
-                resourceId: newUser.id,
-                details: {username: newUser.username},
+                resourceId: user.id,
+                details: {username: user.username},
                 request,
             })
 
             return {
                 success: true,
-                data: {
-                    user: newUser,
-                    ...tokens,
-                },
+                data: {user, ...tokens},
             }
         },
         {body: registerBody, detail: {summary: 'Register a new user'}},
     )
     .post(
         '/login',
-        // @ts-ignore - Elysia body type inference
-        async ({body, JWT, request}) => {
-            const email = body.email.trim().toLowerCase()
-            const [found] = await db.select().from(users).where(eq(users.email, email)).limit(1)
+        async ({body, JWT, request, set}) => {
+            disableAuthResponseCaching(set)
+            const email = normalizedLoginEmail(body.email)
+            enforceLoginRateLimit(request, email)
 
-            if (!found || !(await Bun.password.verify(body.password, found.passwordHash))) {
-                return errorResponse(401, 'INVALID_CREDENTIALS', 'Invalid email or password')
-            }
-
-            const user = {id: found.id, username: found.username, email: found.email}
+            const user = await authenticateUser(email, body.password)
+            resetLoginRateLimit(request, email)
             const tokens = await issueTokenPair(JWT, user)
             await recordAuditLog({
-                userId: found.id,
+                userId: user.id,
                 action: 'auth.login',
                 resourceType: 'user',
-                resourceId: found.id,
+                resourceId: user.id,
                 request,
             })
 
@@ -87,8 +74,10 @@ export const authRoutes = new Elysia({prefix: '/auth'})
     )
     .post(
         '/refresh',
-        // @ts-ignore - Elysia body type inference
-        async ({body, JWT, request}) => {
+        async ({body, JWT, request, set}) => {
+            disableAuthResponseCaching(set)
+            enforceRefreshRateLimit(request, body.token)
+
             const {user, tokens} = await rotateRefreshToken(JWT, body.token)
             await recordAuditLog({
                 userId: user.id,
@@ -107,8 +96,10 @@ export const authRoutes = new Elysia({prefix: '/auth'})
     )
     .post(
         '/logout',
-        // @ts-ignore - Elysia body type inference
-        async ({body, JWT, request}) => {
+        async ({body, JWT, request, set}) => {
+            disableAuthResponseCaching(set)
+            enforceRefreshRateLimit(request, body.token)
+
             const revoked = await revokeRefreshToken(JWT, body.token)
             await recordAuditLog({
                 action: 'auth.logout',
