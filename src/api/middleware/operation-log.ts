@@ -2,6 +2,7 @@ import {STATUS_CODES} from 'node:http'
 import {Elysia} from 'elysia'
 import {db} from '../../db/index.js'
 import {operationLogs} from '../../db/schema.js'
+import {resolveClientIp} from '../http/client-ip.js'
 import {authenticateAccessToken, authPlugin} from './auth.js'
 import {requestContextPlugin} from './request-context.js'
 
@@ -16,14 +17,6 @@ function resolveStatusCode(status: unknown, responseValue: unknown): number {
     }
 
     return 200
-}
-
-function resolveClientIp(headers: Headers): string | null {
-    const forwardedFor = headers.get('x-forwarded-for')
-        ?.split(',')[0]
-        ?.trim()
-    const value = forwardedFor || headers.get('x-real-ip')?.trim()
-    return value ? value.slice(0, 45) : null
 }
 
 export const operationLogPlugin = new Elysia({name: 'operation-log'})
