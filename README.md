@@ -2,7 +2,7 @@
 
 基于 **Bun + TypeScript + AI SDK + Elysia + Drizzle ORM + PostgreSQL** 的多 Agent 学习与实践项目。
 
-当前项目已经从简单示例扩展为具备认证、会话、工具执行、审计、文件管理和工程化部署能力的 Agent API。
+当前项目已经从简单示例扩展为具备认证、会话、工具执行、审计、文件管理、运行时保护和工程化部署能力的 Agent API。
 
 ## 核心能力
 
@@ -13,11 +13,13 @@
 - 最近 50 条会话消息上下文
 - Bearer-only JWT 认证
 - 服务端 Refresh Token 哈希存储、轮换、复用检测和注销
+- 注册、登录、Token 和 Chat 请求限流
+- 用户级与 session 级 Chat 并发控制
 - Agent、会话、消息、文件、审计与请求日志持久化
 - 请求 ID、统一异常响应和生产环境错误脱敏
-- PostgreSQL 就绪检查和优雅关闭
+- PostgreSQL 就绪检查、版本化迁移和优雅关闭
 - Swagger API 文档
-- Bun 单元测试、类型检查和构建 CI
+- Bun 单元测试、类型检查、构建和 PostgreSQL 迁移 CI
 
 ## 环境要求
 
@@ -44,27 +46,55 @@ LLM_MODEL_GENERAL=lmstudio:qwen-local
 
 ### 新数据库
 
-开发阶段可以直接同步 Schema：
+推荐直接执行版本化迁移：
+
+```bash
+bun run db:check
+bun run db:migrate
+bun run db:verify
+```
+
+开发阶段需要快速同步 Schema 时也可以使用：
 
 ```bash
 bun run db:push
 ```
 
+`db:push` 只适合本地开发，不应替代生产迁移。
+
 ### 已有数据库
 
-不要直接对生产库执行 `db:push`。先阅读：
+不要直接对测试库或生产库执行 `db:push`。先阅读：
 
 ```text
 docs/database-migration-v2.md
 ```
 
-推荐流程：
+执行历史数据预检和备份后，再运行：
 
 ```bash
-bun run db:generate -- --name=core-hardening-v2
-# 审查生成的 SQL，并在测试库演练
+bun run db:check
 bun run db:migrate
+bun run db:verify
 ```
+
+迁移系统会：
+
+- 按文件名前四位版本号顺序执行 SQL。
+- 使用 PostgreSQL advisory lock 防止多个实例同时迁移。
+- 在 `study_agent_schema_migrations` 中记录文件名和 SHA-256 checksum。
+- 已应用迁移内容被修改时拒绝继续执行。
+- 整批迁移失败时回滚事务。
+
+创建下一份迁移：
+
+```bash
+bun run db:generate -- add-agent-status
+# 编辑生成的 src/db/migrations/0002_add-agent-status.sql
+bun run db:check
+```
+
+迁移只允许向前追加。不要修改已经部署过的 SQL 文件。
 
 ## 运行
 
@@ -167,7 +197,19 @@ Content-Type: application/json
 }
 ```
 
-服务端只保存 Refresh Token 的 SHA-256 哈希，不保存明文 Token。
+服务端只保存 Refresh Token 的 SHA-256 哈希，不保存明文 Token。认证响应带有 `Cache-Control: no-store`。
+
+## 限流与并发
+
+注册、登录、Refresh Token 和 Chat 分别使用独立限流策略。Chat 同时按用户和 session 控制并发，默认同一个 session 只允许一个模型执行。
+
+相关配置和多实例注意事项见：
+
+```text
+docs/runtime-guardrails.md
+```
+
+当前限流和并发租约是进程内实现。水平扩容前应替换为 Redis 等共享后端。
 
 ## Agent 工具
 
@@ -185,6 +227,7 @@ Agent 创建或更新时，`tools` 只能引用已注册的内置工具。未知
 - 已绑定 Agent 的 session 不能切换到另一个 Agent。
 - 并发创建同一 session 时通过数据库唯一约束收敛。
 - 工具调用和结果会保存，并进入后续对话上下文。
+- 同一 session 的模型执行默认串行化。
 
 ## 管理员权限
 
@@ -232,15 +275,16 @@ X-Request-Id: frontend-request-123
 ## 常用命令
 
 ```bash
-bun run typecheck     # TypeScript 类型检查
-bun test              # 单元测试
-bun run check         # 类型检查 + 单元测试
-bun run build         # 构建 Bun 生产产物
-bun run db:generate   # 生成 Drizzle migration
-bun run db:check      # 检查 migration 一致性
-bun run db:migrate    # 应用 migration
-bun run db:push       # 开发环境直接同步 Schema
-bun run db:studio     # Drizzle Studio
+bun run typecheck          # TypeScript 类型检查
+bun test                   # 单元测试
+bun run check              # 类型检查 + 单元测试
+bun run build              # 构建 Bun 生产产物
+bun run db:generate -- 名称 # 创建下一份连续编号 SQL 迁移
+bun run db:check           # 校验迁移文件命名、版本和 checksum
+bun run db:migrate         # advisory lock 下应用未执行迁移
+bun run db:verify          # 验证表、列、约束和索引
+bun run db:push            # 仅开发环境直接同步 Schema
+bun run db:studio          # Drizzle Studio
 ```
 
 GitHub Actions 会执行：
@@ -249,7 +293,9 @@ GitHub Actions 会执行：
 bun install --frozen-lockfile
 bun run typecheck
 bun test
+bun run db:check
 bun run build
+PostgreSQL 16: db:migrate → 再次 db:migrate → db:verify
 ```
 
 ## 目录结构
@@ -264,9 +310,9 @@ src/
 │   └── schemas/      # 请求与响应 Schema
 ├── app/              # 应用构建与进程启动
 ├── config/           # 集中环境配置和校验
-├── db/               # Drizzle 连接、Schema 和 migrations
+├── db/               # 连接、Schema、迁移执行器和 SQL migrations
 ├── llm/              # 模型领域接口、Provider 和注册表
-├── services/         # Token 与审计服务
+├── services/         # Auth、Agent、Chat、文件、Token、限流和审计服务
 └── tools/            # 工具定义、目录和执行注册表
 ```
 
@@ -278,6 +324,7 @@ src/
 - Agent、会话历史和文件按当前用户隔离
 - 生产环境必须显式配置强 JWT 密钥
 - Agent 工具使用注册白名单
-- 上传文件默认限制为 10 MiB
+- 上传文件默认限制为 10 MiB，并校验存储路径边界
 - 管理日志接口需要显式管理员权限
 - 数据库通过外键、唯一索引和 CHECK 约束维护关键不变量
+- 生产数据库使用版本化 SQL 迁移，不修改已应用迁移
