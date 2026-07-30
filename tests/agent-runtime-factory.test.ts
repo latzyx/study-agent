@@ -21,20 +21,34 @@ function factory() {
     })
 }
 
+function createMathRuntime() {
+    return factory().create({
+        name: ' Math ',
+        description: ' test ',
+        systemPrompt: ' calculate ',
+        modelProfile: 'general',
+        maxSteps: 4,
+        tools: [' calculator ', 'calculator'],
+    })
+}
+
 describe('AgentRuntimeFactory', () => {
     test('creates an immutable runtime descriptor from one config snapshot', () => {
-        const runtime = factory().create({
-            name: ' Math ',
-            description: ' test ',
-            systemPrompt: ' calculate ',
-            modelProfile: 'general',
-            maxSteps: 4,
-            tools: [' calculator ', 'calculator'],
-        })
+        const runtime = createMathRuntime()
 
         expect(runtime.agentKey).toBe('math')
         expect(runtime.modelId).toBe('test:general')
         expect(runtime.toolNames).toEqual(['calculator'])
+        expect(runtime.snapshot).toEqual({
+            name: 'Math',
+            description: 'test',
+            systemPrompt: 'calculate',
+            modelProfile: 'general',
+            modelId: 'test:general',
+            maxSteps: 4,
+            agentKey: 'math',
+            toolNames: ['calculator'],
+        })
         expect(runtime.agent.config).toMatchObject({
             name: 'Math',
             description: 'test',
@@ -42,6 +56,35 @@ describe('AgentRuntimeFactory', () => {
             maxSteps: 4,
             modelId: 'test:general',
         })
+        expect(Object.isFrozen(runtime)).toBe(true)
+        expect(Object.isFrozen(runtime.snapshot)).toBe(true)
+        expect(Object.isFrozen(runtime.toolNames)).toBe(true)
+        expect(Object.isFrozen(runtime.agent.config)).toBe(true)
+        expect(Object.isFrozen(runtime.agent.config.tools)).toBe(true)
+    })
+
+    test('creates a deterministic fingerprint for equivalent normalized snapshots', () => {
+        const first = createMathRuntime()
+        const second = factory().create({
+            name: 'Math',
+            description: 'test',
+            systemPrompt: 'calculate',
+            modelProfile: 'general',
+            maxSteps: 4,
+            tools: ['calculator'],
+        })
+        const changed = factory().create({
+            name: 'Math',
+            description: 'test',
+            systemPrompt: 'calculate carefully',
+            modelProfile: 'general',
+            maxSteps: 4,
+            tools: ['calculator'],
+        })
+
+        expect(first.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+        expect(second.fingerprint).toBe(first.fingerprint)
+        expect(changed.fingerprint).not.toBe(first.fingerprint)
     })
 
     test('rejects invalid runtime snapshots before provider execution', () => {
