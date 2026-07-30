@@ -1,6 +1,7 @@
 import {Elysia} from 'elysia'
 import {jwt} from '@elysiajs/jwt'
 import {env} from '../../config/env.js'
+import {createApiError} from '../errors/api-error.js'
 
 export interface AccessTokenPayload {
     sub: string
@@ -33,9 +34,31 @@ export async function authenticateAccessToken(
     }
 }
 
+export async function requireAccessToken(
+    JWT: JwtVerifier,
+    authorization?: string,
+): Promise<AccessTokenPayload> {
+    const user = await authenticateAccessToken(JWT, authorization)
+    if (!user) {
+        throw createApiError(401, 'UNAUTHORIZED', 'Authentication required')
+    }
+    return user
+}
+
 export function hasAdminAccess(user: AccessTokenPayload): boolean {
     return env.auth.adminUserIds.has(user.sub)
         || (typeof user.username === 'string' && env.auth.adminUsernames.has(user.username))
+}
+
+export async function requireAdminAccess(
+    JWT: JwtVerifier,
+    authorization?: string,
+): Promise<AccessTokenPayload> {
+    const user = await requireAccessToken(JWT, authorization)
+    if (!hasAdminAccess(user)) {
+        throw createApiError(403, 'FORBIDDEN', 'Administrator access required')
+    }
+    return user
 }
 
 export function unauthorizedResponse(): Response {
