@@ -6,7 +6,7 @@ import type {
     LLMUsage,
 } from '../llm/domain/llm-provider'
 import type {Tool} from '../tools/domain/tool'
-import type {ToolRegistry} from '../tools/registry/tool-registry'
+import type {ToolRegistry, ToolScope} from '../tools/registry/tool-registry'
 
 const DEFAULT_MAX_STEPS = 5
 const DEFAULT_MAX_HISTORY_MESSAGES = 50
@@ -51,6 +51,7 @@ function serializeToolResult(result: unknown, maxChars: number): string {
 export abstract class BaseAgent implements Agent {
     private toolsRegistered = false
     private agentTools: ReadonlyMap<string, Tool> | undefined
+    private readonly toolScope: ToolScope = Symbol('agent-tool-scope')
 
     constructor(
         public config: AgentConfig,
@@ -71,7 +72,7 @@ export abstract class BaseAgent implements Agent {
                 throw new Error(`Agent tool declared more than once: ${tool.name}`)
             }
 
-            this.toolRegistry.register(tool)
+            this.toolRegistry.register(tool, this.toolScope)
             toolMap.set(tool.name, tool)
         }
 
@@ -132,6 +133,7 @@ export abstract class BaseAgent implements Agent {
 
         for (let step = 1; step <= maxSteps; step++) {
             const pendingToolCalls: LLMToolCall[] = []
+            const pendingToolCallIds = new Set<string>()
             let fullText = ''
             let usage: LLMUsage | undefined
 
@@ -157,6 +159,15 @@ export abstract class BaseAgent implements Agent {
                         return
                     }
 
+                    if (!event.toolCall.id || pendingToolCallIds.has(event.toolCall.id)) {
+                        yield {
+                            type: 'error',
+                            error: new Error(`Model returned an invalid or duplicate toolCallId: ${event.toolCall.id}`),
+                        }
+                        return
+                    }
+
+                    pendingToolCallIds.add(event.toolCall.id)
                     pendingToolCalls.push(event.toolCall)
                     yield {type: 'tool-call', toolCall: event.toolCall}
                     continue
@@ -199,7 +210,7 @@ export abstract class BaseAgent implements Agent {
                     const result = await this.toolRegistry.execute(toolCall, {
                         ...options.toolContext,
                         abortSignal: options.abortSignal,
-                    })
+                    }, this.toolScope)
                     yield {
                         type: 'tool-result',
                         toolResult: {
