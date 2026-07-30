@@ -13,9 +13,10 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run typecheck && bun test",
-    "db:generate": "drizzle-kit generate",
-    "db:check": "drizzle-kit check",
-    "db:migrate": "drizzle-kit migrate",
+    "db:generate": "bun run src/db/create-migration.ts",
+    "db:check": "bun run src/db/check-migrations.ts",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:verify": "bun run src/db/verify-migrations.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },
