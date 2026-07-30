@@ -81,7 +81,7 @@ class TestAgent extends BaseAgent {
         super(config, provider, registry)
     }
 
-    getTools(): Tool[] {
+    override getTools(): Tool[] {
         return this.tools
     }
 }
