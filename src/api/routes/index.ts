@@ -1,15 +1,6 @@
-import {authRoutes} from './auth.js'
-import {agentRoutes} from './agents.js'
-import {chatRoutes} from './chat.js'
-import {adminRoutes} from './admin.js'
-import {fileRoutes} from './files.js'
-import {healthRoutes} from './health.js'
-
-export {
-    authRoutes,
-    agentRoutes,
-    chatRoutes,
-    adminRoutes,
-    fileRoutes,
-    healthRoutes,
-}
+export {adminRoutes} from './admin.js'
+export {agentRoutes} from './agents.js'
+export {authRoutes} from './auth.js'
+export {chatRoutes} from './chat.js'
+export {fileRoutes} from './files.js'
+export {healthRoutes} from './health.js'
