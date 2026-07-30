@@ -2,6 +2,7 @@ import {Elysia, t} from 'elysia'
 import {and, eq} from 'drizzle-orm'
 import {mkdir, unlink} from 'node:fs/promises'
 import * as path from 'node:path'
+import {env} from '../../config/env.js'
 import {db} from '../../db/index.js'
 import {files} from '../../db/schema.js'
 import {
@@ -10,13 +11,8 @@ import {
     unauthorizedResponse,
 } from '../middleware/auth.js'
 
-function positiveNumber(value: string | undefined, fallback: number): number {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-}
-
-const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR ?? 'uploads')
-const MAX_UPLOAD_BYTES = positiveNumber(process.env.MAX_UPLOAD_BYTES, 10 * 1024 * 1024)
+const UPLOAD_DIR = path.resolve(env.uploads.directory)
+const MAX_UPLOAD_BYTES = env.uploads.maxBytes
 const uploadDirectoryReady = mkdir(UPLOAD_DIR, {recursive: true})
 
 function apiError(status: number, code: string, message: string): Response {
@@ -28,7 +24,7 @@ function serializeFile(file: typeof files.$inferSelect) {
         id: file.id,
         filename: file.filename,
         mimeType: file.mimeType ?? undefined,
-        size: Number(file.size ?? 0),
+        size: file.size,
         createdAt: file.createdAt.toISOString(),
     }
 }
@@ -71,7 +67,7 @@ export const fileRoutes = new Elysia({prefix: '/files'})
                     userId: user.sub,
                     filename: file.name,
                     storagePath,
-                    mimeType: file.type,
+                    mimeType: file.type || null,
                     size: file.size,
                 }).returning()
 
