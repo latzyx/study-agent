@@ -24,29 +24,22 @@ interface JwtVerifier {
     verify(token: string): Promise<Record<string, unknown> | false>
 }
 
-interface AuthCookie {
-    value?: unknown
-}
+function resolveBearerToken(authorization?: string): string | null {
+    if (!authorization?.startsWith('Bearer ')) return null
 
-function resolveAccessToken(auth?: AuthCookie, authorization?: string): string | null {
-    if (authorization?.startsWith('Bearer ')) {
-        const token = authorization.slice('Bearer '.length).trim()
-        if (token) return token
-    }
-
-    return typeof auth?.value === 'string' && auth.value.length > 0 ? auth.value : null
+    const token = authorization.slice('Bearer '.length).trim()
+    return token.length > 0 ? token : null
 }
 
 export async function authenticateAccessToken(
     JWT: JwtVerifier,
-    auth?: AuthCookie,
     authorization?: string,
 ): Promise<AccessTokenPayload | null> {
-    const token = resolveAccessToken(auth, authorization)
+    const token = resolveBearerToken(authorization)
     if (!token) return null
 
     const payload = await JWT.verify(token)
-    if (!payload || payload.type === 'refresh' || typeof payload.sub !== 'string') return null
+    if (!payload || payload.type !== 'access' || typeof payload.sub !== 'string') return null
 
     return {
         sub: payload.sub,
