@@ -298,6 +298,8 @@ bun run build
 PostgreSQL 16: db:migrate → 再次 db:migrate → db:verify
 ```
 
+当前迁移已经在 GitHub Actions 的 PostgreSQL 16 服务中通过首次执行、重复幂等和 Schema 完整性验证。
+
 ## 目录结构
 
 ```text
