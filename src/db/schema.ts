@@ -114,11 +114,14 @@ export const auditLogs = pgTable('audit_logs', {
 
 export const operationLogs = pgTable('operation_logs', {
     id: uuid('id').defaultRandom().primaryKey(),
+    requestId: varchar('request_id', {length: 100}).notNull().unique(),
     userId: uuid('user_id').references(() => users.id, {onDelete: 'set null'}),
     method: varchar('method', {length: 10}).notNull(),
     path: varchar('path', {length: 255}).notNull(),
     statusCode: integer('status_code').notNull(),
     durationMs: integer('duration_ms').notNull(),
+    ipAddress: varchar('ip_address', {length: 45}),
+    userAgent: varchar('user_agent', {length: 500}),
     createdAt: createdAt(),
 }, (table) => [
     index('operation_logs_created_at_idx').on(table.createdAt),
