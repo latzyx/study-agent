@@ -78,6 +78,18 @@ bun run db:generate -- --name=core-hardening-v2
 bun run db:migrate
 ```
 
+## Refresh Token 升级影响
+
+旧版本只签发 JWT，没有在数据库中保存 Refresh Token 会话。V2 发布后，这些旧 Refresh Token 没有对应的 `refresh_tokens` 记录，因此无法继续刷新。
+
+建议发布时：
+
+- 通知用户升级后需要重新登录一次。
+- 不要尝试把旧 Refresh Token 明文导入数据库。
+- 新版本登录后只保存 SHA-256 哈希。
+- 每次刷新会原子撤销旧 Token 并签发新 Token。
+- 注销接口会主动撤销对应 Token 会话。
+
 ## 回滚准备
 
 上线前至少准备：
@@ -85,7 +97,7 @@ bun run db:migrate
 - 可恢复的数据库备份。
 - 迁移前后行数与关键业务数据校验 SQL。
 - 应用旧版本镜像或构建产物。
-- Refresh Token 变更通知：升级后旧版本签发、但未写入 `refresh_tokens` 的 Token 将无法刷新，用户需要重新登录。
+- Refresh Token 变更通知与重新登录方案。
 
 ## 上线后验证
 
