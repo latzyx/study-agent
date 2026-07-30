@@ -1,10 +1,13 @@
 import {z} from 'zod'
 
+const booleanEnv = z.enum(['true', 'false']).transform((value) => value === 'true')
+
 const rawEnvSchema = z.object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     HOST: z.string().trim().min(1).default('0.0.0.0'),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     CORS_ORIGINS: z.string().default(''),
+    TRUST_PROXY_HEADERS: booleanEnv.default('false'),
 
     JWT_SECRET: z.string().trim().optional(),
     JWT_ISSUER: z.string().trim().min(1).default('study-agent'),
@@ -13,6 +16,18 @@ const rawEnvSchema = z.object({
     REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().min(300).max(90 * 86400).default(7 * 86400),
     ADMIN_USER_IDS: z.string().default(''),
     ADMIN_USERNAMES: z.string().default(''),
+
+    AUTH_LOGIN_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(5),
+    AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86400).default(15 * 60),
+    AUTH_REGISTER_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(1000).default(5),
+    AUTH_REGISTER_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86400).default(60 * 60),
+    AUTH_REFRESH_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(5000).default(30),
+    AUTH_REFRESH_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86400).default(60),
+    CHAT_RATE_LIMIT_MAX: z.coerce.number().int().min(1).max(10000).default(30),
+    CHAT_RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().min(1).max(86400).default(60),
+    CHAT_MAX_CONCURRENT_PER_USER: z.coerce.number().int().min(1).max(100).default(2),
+    CHAT_MAX_CONCURRENT_PER_SESSION: z.coerce.number().int().min(1).max(20).default(1),
+    RATE_LIMIT_MAX_KEYS: z.coerce.number().int().min(100).max(1_000_000).default(10_000),
 
     DATABASE_URL: z.string().trim().min(1).optional(),
     DB_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100).default(10),
@@ -78,6 +93,7 @@ export const env = Object.freeze({
         host: raw.HOST,
         port: raw.PORT,
         corsOrigins: splitCsv(raw.CORS_ORIGINS),
+        trustProxyHeaders: raw.TRUST_PROXY_HEADERS,
     },
     auth: {
         jwtSecret: raw.JWT_SECRET || developmentJwtSecret,
@@ -87,6 +103,27 @@ export const env = Object.freeze({
         refreshTokenTtlSeconds: raw.REFRESH_TOKEN_TTL_SECONDS,
         adminUserIds: new Set(splitCsv(raw.ADMIN_USER_IDS)),
         adminUsernames: new Set(splitCsv(raw.ADMIN_USERNAMES)),
+    },
+    limits: {
+        maxKeys: raw.RATE_LIMIT_MAX_KEYS,
+        authLogin: {
+            limit: raw.AUTH_LOGIN_RATE_LIMIT_MAX,
+            windowMs: raw.AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS * 1000,
+        },
+        authRegister: {
+            limit: raw.AUTH_REGISTER_RATE_LIMIT_MAX,
+            windowMs: raw.AUTH_REGISTER_RATE_LIMIT_WINDOW_SECONDS * 1000,
+        },
+        authRefresh: {
+            limit: raw.AUTH_REFRESH_RATE_LIMIT_MAX,
+            windowMs: raw.AUTH_REFRESH_RATE_LIMIT_WINDOW_SECONDS * 1000,
+        },
+        chat: {
+            limit: raw.CHAT_RATE_LIMIT_MAX,
+            windowMs: raw.CHAT_RATE_LIMIT_WINDOW_SECONDS * 1000,
+            maxConcurrentPerUser: raw.CHAT_MAX_CONCURRENT_PER_USER,
+            maxConcurrentPerSession: raw.CHAT_MAX_CONCURRENT_PER_SESSION,
+        },
     },
     database: {
         url: raw.DATABASE_URL,
