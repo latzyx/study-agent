@@ -131,6 +131,14 @@ describe('BaseAgent', () => {
         expect(provider.requests[0]?.messages).toContainEqual({role: 'user', content: '上一个问题'})
         expect(provider.requests[0]?.messages).toContainEqual({role: 'assistant', content: '上一个答案'})
         expect(provider.requests[1]?.messages).toContainEqual({
+            role: 'assistant',
+            content: '',
+            toolCalls: [
+                {id: 'call-add', name: 'add', input: {a: 2, b: 3}},
+                {id: 'call-multiply', name: 'multiply', input: {a: 4, b: 5}},
+            ],
+        })
+        expect(provider.requests[1]?.messages).toContainEqual({
             role: 'tool',
             name: 'add',
             toolCallId: 'call-add',
