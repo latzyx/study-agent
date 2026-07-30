@@ -28,13 +28,24 @@ interface AuthCookie {
     value?: unknown
 }
 
+function resolveAccessToken(auth?: AuthCookie, authorization?: string): string | null {
+    if (authorization?.startsWith('Bearer ')) {
+        const token = authorization.slice('Bearer '.length).trim()
+        if (token) return token
+    }
+
+    return typeof auth?.value === 'string' && auth.value.length > 0 ? auth.value : null
+}
+
 export async function authenticateAccessToken(
     JWT: JwtVerifier,
     auth?: AuthCookie,
+    authorization?: string,
 ): Promise<AccessTokenPayload | null> {
-    if (typeof auth?.value !== 'string' || auth.value.length === 0) return null
+    const token = resolveAccessToken(auth, authorization)
+    if (!token) return null
 
-    const payload = await JWT.verify(auth.value)
+    const payload = await JWT.verify(token)
     if (!payload || payload.type === 'refresh' || typeof payload.sub !== 'string') return null
 
     return {
