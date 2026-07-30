@@ -1,6 +1,6 @@
 import {Elysia, t} from 'elysia'
 import {and, eq} from 'drizzle-orm'
-import {unlink} from 'node:fs/promises'
+import {mkdir, unlink} from 'node:fs/promises'
 import * as path from 'node:path'
 import {db} from '../../db/index.js'
 import {files} from '../../db/schema.js'
@@ -10,8 +10,14 @@ import {
     unauthorizedResponse,
 } from '../middleware/auth.js'
 
+function positiveNumber(value: string | undefined, fallback: number): number {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR ?? 'uploads')
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES ?? 10 * 1024 * 1024)
+const MAX_UPLOAD_BYTES = positiveNumber(process.env.MAX_UPLOAD_BYTES, 10 * 1024 * 1024)
+const uploadDirectoryReady = mkdir(UPLOAD_DIR, {recursive: true})
 
 function apiError(status: number, code: string, message: string): Response {
     return Response.json({success: false, error: {code, message}}, {status})
@@ -46,6 +52,9 @@ export const fileRoutes = new Elysia({prefix: '/files'})
 
             const file = body.file
             if (!file) return apiError(400, 'NO_FILE', 'No file provided')
+            if (file.name.length === 0 || file.name.length > 255) {
+                return apiError(400, 'INVALID_FILENAME', 'Filename must contain 1 to 255 characters')
+            }
             if (file.size > MAX_UPLOAD_BYTES) {
                 return apiError(413, 'FILE_TOO_LARGE', `File exceeds ${MAX_UPLOAD_BYTES} bytes`)
             }
@@ -54,6 +63,7 @@ export const fileRoutes = new Elysia({prefix: '/files'})
             const storageName = `${crypto.randomUUID()}${extension}`
             const storagePath = path.join(UPLOAD_DIR, storageName)
 
+            await uploadDirectoryReady
             await Bun.write(storagePath, file)
 
             try {
