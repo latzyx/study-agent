@@ -1,17 +1,16 @@
 import {and, asc, desc, eq} from 'drizzle-orm'
-import {BaseAgent} from '../agent/base-agent.js'
-import type {AgentConfig, AgentEvent} from '../agent/types/agent.js'
+import type {AgentEvent} from '../agent/types/agent.js'
+import {
+    defaultAgentRuntimeFactory,
+    type AgentRuntimeDescriptor,
+} from '../agent/runtime/agent-runtime-factory.js'
 import {createApiError} from '../api/errors/api-error.js'
-import {inferAgentKeyFromTools, resolveAgentTools} from '../agents/catalog.js'
 import {env} from '../config/env.js'
 import {db} from '../db/index.js'
 import {agents, conversations, messages} from '../db/schema.js'
 import type {LLMMessage, LLMUsage} from '../llm/domain/llm-provider.js'
-import {AISDKProviderAdapter} from '../llm/providers/ai-sdk-provider.js'
-import {resolveModel} from '../llm/registry/model-registry.js'
-import {resolveLanguageModel} from '../llm/registry/provider-registry.js'
-import {ToolRegistry} from '../tools/registry/tool-registry.js'
 import {findUserAgent} from './agent-service.js'
+import {toAgentExecutionApiError} from './agent-execution-error.js'
 import {
     buildTurnMessageRows,
     restoreLLMMessages,
@@ -20,6 +19,7 @@ import {
 import {acquireChatExecutionLease, type ConcurrencyLease} from './chat-concurrency-service.js'
 
 const HISTORY_MESSAGE_LIMIT = 50
+const HISTORY_QUERY_LIMIT = HISTORY_MESSAGE_LIMIT * 3
 
 export interface ChatInput {
     userId: string
@@ -45,49 +45,48 @@ export type ChatStreamEvent =
     | {type: 'done'; sessionId: string}
 
 interface PreparedExecution {
-    agent: BaseAgent
+    runtime: AgentRuntimeDescriptor
     conversation: typeof conversations.$inferSelect
     history: LLMMessage[]
+    normalizedMessage: string
     lease: ConcurrencyLease
 }
 
-function publicExecutionError(error?: Error): string {
-    return env.isProduction
-        ? 'Agent execution failed'
-        : error?.message ?? 'Agent execution failed'
+interface ExecutionState {
+    reply: string
+    toolCalls: ToolCallRecord[]
+    completedToolCallIds: Set<string>
+    finished: boolean
 }
 
-function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
-    let selectedTools
+function createExecutionState(): ExecutionState {
+    return {
+        reply: '',
+        toolCalls: [],
+        completedToolCallIds: new Set<string>(),
+        finished: false,
+    }
+}
+
+function createRuntime(agentRow: typeof agents.$inferSelect): AgentRuntimeDescriptor {
     try {
-        const agentKey = inferAgentKeyFromTools(agentRow.tools)
-        selectedTools = resolveAgentTools(agentKey, agentRow.tools)
+        return defaultAgentRuntimeFactory.create({
+            name: agentRow.name,
+            description: agentRow.description,
+            systemPrompt: agentRow.systemPrompt,
+            modelProfile: agentRow.modelProfile,
+            maxSteps: agentRow.maxSteps,
+            tools: agentRow.tools,
+        })
     } catch (error) {
         throw createApiError(
             500,
-            'INVALID_AGENT_TOOL_CONFIGURATION',
+            'INVALID_AGENT_RUNTIME_CONFIGURATION',
             env.isProduction
-                ? 'Agent tool configuration is invalid'
-                : error instanceof Error ? error.message : 'Agent tool configuration is invalid',
+                ? 'Agent runtime configuration is invalid'
+                : error instanceof Error ? error.message : 'Agent runtime configuration is invalid',
         )
     }
-
-    const modelId = resolveModel(agentRow.modelProfile)
-    const config: AgentConfig = {
-        name: agentRow.name,
-        description: agentRow.description ?? '',
-        systemPrompt: agentRow.systemPrompt ?? 'You are a helpful assistant.',
-        modelProfile: agentRow.modelProfile,
-        modelId,
-        maxSteps: agentRow.maxSteps,
-        tools: selectedTools,
-    }
-
-    return new (class extends BaseAgent {})(
-        config,
-        new AISDKProviderAdapter(resolveLanguageModel),
-        new ToolRegistry(),
-    )
 }
 
 async function findConversationBySession(userId: string, sessionId: string) {
@@ -143,21 +142,21 @@ async function loadConversationHistory(conversationId: string): Promise<LLMMessa
         .from(messages)
         .where(eq(messages.conversationId, conversationId))
         .orderBy(desc(messages.createdAt))
-        .limit(HISTORY_MESSAGE_LIMIT)
+        .limit(HISTORY_QUERY_LIMIT)
 
-    return restoreLLMMessages(recentMessages.reverse())
+    return restoreLLMMessages(recentMessages.reverse()).slice(-HISTORY_MESSAGE_LIMIT)
 }
 
-function applyAgentEvent(
-    event: AgentEvent,
-    state: {reply: string; toolCalls: ToolCallRecord[]},
-): void {
+function applyAgentEvent(event: AgentEvent, state: ExecutionState): void {
     if (event.type === 'text-delta') {
         state.reply += event.text ?? ''
         return
     }
 
     if (event.type === 'tool-call' && event.toolCall) {
+        if (state.toolCalls.some((item) => item.id === event.toolCall?.id)) {
+            throw new Error(`Duplicate tool call received by Chat runtime: ${event.toolCall.id}`)
+        }
         state.toolCalls.push({
             id: event.toolCall.id,
             name: event.toolCall.name,
@@ -170,15 +169,37 @@ function applyAgentEvent(
     if (event.type === 'tool-result' && event.toolResult) {
         const call = state.toolCalls.find((item) => item.id === event.toolResult?.toolCallId)
         if (!call) throw new Error(`Tool result has no matching call: ${event.toolResult.toolCallId}`)
+        if (state.completedToolCallIds.has(call.id)) {
+            throw new Error(`Tool result was received more than once: ${call.id}`)
+        }
         call.result = event.toolResult.result
+        state.completedToolCallIds.add(call.id)
+        return
+    }
+
+    if (event.type === 'finish') state.finished = true
+}
+
+function assertExecutionComplete(state: ExecutionState): void {
+    const incomplete = state.toolCalls
+        .filter((call) => !state.completedToolCallIds.has(call.id))
+        .map((call) => call.id)
+
+    if (incomplete.length > 0) {
+        throw new Error(`Agent finished with incomplete tool calls: ${incomplete.join(', ')}`)
+    }
+    if (!state.finished) throw new Error('Agent stream ended without a finish event')
+    if (!state.reply.trim() && state.toolCalls.length === 0) {
+        throw new Error('Agent produced no assistant response')
     }
 }
 
 async function persistConversationTurn(
     conversationId: string,
     userMessage: string,
-    state: {reply: string; toolCalls: ToolCallRecord[]},
+    state: ExecutionState,
 ): Promise<void> {
+    assertExecutionComplete(state)
     const rows = buildTurnMessageRows(conversationId, userMessage, state.reply, state.toolCalls)
     await db.transaction(async (tx) => {
         await tx.insert(messages).values(rows)
@@ -198,9 +219,10 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
 
     try {
         return {
-            agent: createAgentFromConfig(agentRow),
+            runtime: createRuntime(agentRow),
             conversation,
             history: await loadConversationHistory(conversation.id),
+            normalizedMessage,
             lease,
         }
     } catch (error) {
@@ -211,25 +233,31 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
 
 export async function executeChat(input: ChatInput): Promise<ChatResult> {
     const execution = await prepareExecution(input)
-    const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
+    const state = createExecutionState()
 
     try {
-        for await (const event of execution.agent.run(input.message, {
+        for await (const event of execution.runtime.agent.run(execution.normalizedMessage, {
             history: execution.history,
             abortSignal: input.abortSignal,
             toolContext: {userId: input.userId, sessionId: execution.conversation.sessionId},
         })) {
-            applyAgentEvent(event, state)
-            if (event.type === 'error') {
-                throw createApiError(502, 'AGENT_EXECUTION_FAILED', publicExecutionError(event.error))
+            try {
+                applyAgentEvent(event, state)
+            } catch (error) {
+                throw toAgentExecutionApiError(error instanceof Error ? error : new Error(String(error)))
             }
+            if (event.type === 'error') throw toAgentExecutionApiError(event.error)
         }
 
         if (input.abortSignal?.aborted) {
             throw createApiError(499, 'REQUEST_ABORTED', 'Request was aborted during execution')
         }
 
-        await persistConversationTurn(execution.conversation.id, input.message.trim(), state)
+        try {
+            await persistConversationTurn(execution.conversation.id, execution.normalizedMessage, state)
+        } catch (error) {
+            throw toAgentExecutionApiError(error instanceof Error ? error : new Error(String(error)))
+        }
         return {
             reply: state.reply,
             sessionId: execution.conversation.sessionId,
@@ -242,15 +270,19 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
 
 export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEvent> {
     const execution = await prepareExecution(input)
-    const state = {reply: '', toolCalls: [] as ToolCallRecord[]}
+    const state = createExecutionState()
 
     try {
-        for await (const event of execution.agent.run(input.message, {
+        for await (const event of execution.runtime.agent.run(execution.normalizedMessage, {
             history: execution.history,
             abortSignal: input.abortSignal,
             toolContext: {userId: input.userId, sessionId: execution.conversation.sessionId},
         })) {
-            applyAgentEvent(event, state)
+            try {
+                applyAgentEvent(event, state)
+            } catch (error) {
+                throw toAgentExecutionApiError(error instanceof Error ? error : new Error(String(error)))
+            }
 
             if (event.type === 'text-delta') {
                 yield {type: 'text-delta', content: event.text ?? ''}
@@ -266,13 +298,17 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             } else if (event.type === 'finish') {
                 yield {type: 'finish', usage: event.usage}
             } else if (event.type === 'error') {
-                throw createApiError(502, 'AGENT_EXECUTION_FAILED', publicExecutionError(event.error))
+                throw toAgentExecutionApiError(event.error)
             }
         }
 
         if (input.abortSignal?.aborted) return
 
-        await persistConversationTurn(execution.conversation.id, input.message.trim(), state)
+        try {
+            await persistConversationTurn(execution.conversation.id, execution.normalizedMessage, state)
+        } catch (error) {
+            throw toAgentExecutionApiError(error instanceof Error ? error : new Error(String(error)))
+        }
         yield {type: 'done', sessionId: execution.conversation.sessionId}
     } finally {
         execution.lease.release()
