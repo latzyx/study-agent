@@ -7,7 +7,7 @@ const rawEnvSchema = z.object({
     HOST: z.string().trim().min(1).default('0.0.0.0'),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     CORS_ORIGINS: z.string().default(''),
-    TRUST_PROXY_HEADERS: booleanEnv.default('false'),
+    TRUST_PROXY_HEADERS: booleanEnv.default(false),
 
     JWT_SECRET: z.string().trim().optional(),
     JWT_ISSUER: z.string().trim().min(1).default('study-agent'),
