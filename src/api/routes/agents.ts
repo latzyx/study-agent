@@ -11,6 +11,7 @@ import {
 } from '../../services/agent-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
 import {authPlugin, requireAccessToken} from '../middleware/auth.js'
+import {getRequestId} from '../middleware/request-context.js'
 import {
     agentListQuery,
     createAgentBody,
@@ -41,11 +42,11 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .post(
         '/',
-        async ({body, JWT, headers, request, requestId}) => {
+        async ({body, JWT, headers, request}) => {
             const user = await requireAccessToken(JWT, headers.authorization)
             const agent = await createUserAgent({
                 userId: user.sub,
-                requestId,
+                requestId: getRequestId(request),
                 name: body.name,
                 description: body.description,
                 systemPrompt: body.systemPrompt,
@@ -102,11 +103,11 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .post(
         '/:id/rollback',
-        async ({params, body, JWT, headers, request, requestId}) => {
+        async ({params, body, JWT, headers, request}) => {
             const user = await requireAccessToken(JWT, headers.authorization)
             const result = await rollbackUserAgent({
                 userId: user.sub,
-                requestId,
+                requestId: getRequestId(request),
                 agentId: params.id,
                 targetVersion: body.targetVersion,
             })
@@ -153,11 +154,11 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .put(
         '/:id',
-        async ({params, body, JWT, headers, request, requestId}) => {
+        async ({params, body, JWT, headers, request}) => {
             const user = await requireAccessToken(JWT, headers.authorization)
             const result = await updateUserAgent({
                 userId: user.sub,
-                requestId,
+                requestId: getRequestId(request),
                 agentId: params.id,
                 name: body.name,
                 description: body.description,
