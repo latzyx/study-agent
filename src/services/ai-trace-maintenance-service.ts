@@ -2,18 +2,25 @@ import {
     purgeExpiredAiTraces,
     recoverStaleAiRuns,
 } from './ai-trace-service.js'
+import {recoverStaleChatRequests} from './chat-idempotency-service.js'
 
 const STALE_RUN_MINUTES = 60
 const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000
 
 async function runMaintenance(): Promise<void> {
-    const [recovered, purged] = await Promise.all([
+    const staleBefore = new Date(Date.now() - STALE_RUN_MINUTES * 60 * 1000)
+    const [recoveredRuns, recoveredRequests, purged] = await Promise.all([
         recoverStaleAiRuns(STALE_RUN_MINUTES),
+        recoverStaleChatRequests(staleBefore),
         purgeExpiredAiTraces(),
     ])
 
-    if (recovered > 0 || purged > 0) {
-        console.log('[ai-trace] Maintenance completed', {recovered, purged})
+    if (recoveredRuns > 0 || recoveredRequests > 0 || purged > 0) {
+        console.log('[maintenance] Completed', {
+            recoveredRuns,
+            recoveredRequests,
+            purgedTraces: purged,
+        })
     }
 }
 
@@ -23,7 +30,7 @@ export function startAiTraceMaintenance(): () => void {
     const execute = () => {
         if (stopped) return
         void runMaintenance().catch((error) => {
-            console.error('[ai-trace] Maintenance failed', error)
+            console.error('[maintenance] Failed', error)
         })
     }
 
