@@ -243,6 +243,15 @@ bun run db:push       # 开发环境直接同步 Schema
 bun run db:studio     # Drizzle Studio
 ```
 
+GitHub Actions 会执行：
+
+```text
+bun install --frozen-lockfile
+bun run typecheck
+bun test
+bun run build
+```
+
 ## 目录结构
 
 ```text
