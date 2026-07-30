@@ -3,6 +3,7 @@ import {
     streamText,
     type LanguageModel,
     type ModelMessage,
+    type TelemetryIntegration,
 } from 'ai'
 import type {
     LLMProvider,
@@ -10,6 +11,7 @@ import type {
     LLMResponse,
     LLMStreamEvent,
     LLMToolCall,
+    LLMTelemetrySettings,
     LLMUsage,
 } from '../domain/llm-provider'
 
@@ -29,6 +31,19 @@ function toUsage(usage?: {
 
 function toError(error: unknown): Error {
     return error instanceof Error ? error : new Error(String(error))
+}
+
+function toTelemetry(settings?: LLMTelemetrySettings) {
+    if (!settings?.isEnabled) return undefined
+
+    return {
+        isEnabled: true,
+        recordInputs: settings.recordInputs,
+        recordOutputs: settings.recordOutputs,
+        functionId: settings.functionId,
+        metadata: settings.metadata,
+        integrations: settings.integrations as TelemetryIntegration[] | undefined,
+    }
 }
 
 export class AISDKProviderAdapter implements LLMProvider {
@@ -79,6 +94,7 @@ export class AISDKProviderAdapter implements LLMProvider {
             temperature: request.temperature,
             maxOutputTokens: request.maxOutputTokens,
             abortSignal: request.abortSignal,
+            experimental_telemetry: toTelemetry(request.telemetry),
         })
 
         const toolCalls: LLMToolCall[] = result.toolCalls.map((toolCall) => ({
@@ -106,6 +122,7 @@ export class AISDKProviderAdapter implements LLMProvider {
             temperature: request.temperature,
             maxOutputTokens: request.maxOutputTokens,
             abortSignal: request.abortSignal,
+            experimental_telemetry: toTelemetry(request.telemetry),
         })
 
         try {
