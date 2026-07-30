@@ -67,6 +67,7 @@ export const agents = pgTable('agents', {
     modelProfile: modelProfileEnum('model_profile').default('general').notNull(),
     maxSteps: integer('max_steps').default(5).notNull(),
     tools: jsonb('tools').$type<string[]>().default([]).notNull(),
+    version: integer('version').default(1).notNull(),
     createdBy: uuid('created_by')
         .references(() => users.id, {onDelete: 'cascade'})
         .notNull(),
@@ -75,6 +76,29 @@ export const agents = pgTable('agents', {
 }, (table) => [
     index('agents_created_by_created_at_idx').on(table.createdBy, table.createdAt),
     check('agents_max_steps_check', sql`${table.maxSteps} between 1 and 50`),
+    check('agents_version_check', sql`${table.version} >= 1`),
+])
+
+export const agentVersions = pgTable('agent_versions', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    agentId: uuid('agent_id')
+        .references(() => agents.id, {onDelete: 'cascade'})
+        .notNull(),
+    version: integer('version').notNull(),
+    snapshot: jsonb('snapshot').$type<Record<string, unknown>>().notNull(),
+    changeType: varchar('change_type', {length: 20}).notNull(),
+    sourceVersion: integer('source_version'),
+    changedBy: uuid('changed_by').references(() => users.id, {onDelete: 'set null'}),
+    requestId: varchar('request_id', {length: 100}),
+    createdAt: createdAt(),
+}, (table) => [
+    uniqueIndex('agent_versions_agent_version_uidx').on(table.agentId, table.version),
+    index('agent_versions_agent_created_at_idx').on(table.agentId, table.createdAt),
+    check('agent_versions_version_check', sql`${table.version} >= 1`),
+    check(
+        'agent_versions_change_type_check',
+        sql`${table.changeType} in ('create', 'update', 'rollback')`,
+    ),
 ])
 
 export const conversations = pgTable('conversations', {
@@ -111,6 +135,91 @@ export const messages = pgTable('messages', {
         'messages_content_or_tool_calls_check',
         sql`${table.content} is not null or ${table.toolCalls} is not null`,
     ),
+])
+
+export const aiRuns = pgTable('ai_runs', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    traceId: varchar('trace_id', {length: 64}).notNull().unique(),
+    requestId: varchar('request_id', {length: 100}),
+    userId: uuid('user_id').references(() => users.id, {onDelete: 'set null'}),
+    agentId: uuid('agent_id').references(() => agents.id, {onDelete: 'set null'}),
+    conversationId: uuid('conversation_id')
+        .references(() => conversations.id, {onDelete: 'set null'}),
+    sessionId: varchar('session_id', {length: 100}),
+    functionId: varchar('function_id', {length: 100}).notNull(),
+    status: varchar('status', {length: 20}).default('running').notNull(),
+    modelProvider: varchar('model_provider', {length: 100}),
+    modelId: varchar('model_id', {length: 255}),
+    inputSnapshot: jsonb('input_snapshot'),
+    outputSnapshot: jsonb('output_snapshot'),
+    metadata: jsonb('metadata'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    totalTokens: integer('total_tokens'),
+    stepCount: integer('step_count').default(0).notNull(),
+    toolCallCount: integer('tool_call_count').default(0).notNull(),
+    errorName: varchar('error_name', {length: 255}),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at', {withTimezone: true}).defaultNow().notNull(),
+    finishedAt: timestamp('finished_at', {withTimezone: true}),
+    durationMs: integer('duration_ms'),
+    createdAt: createdAt(),
+}, (table) => [
+    index('ai_runs_user_created_at_idx').on(table.userId, table.createdAt),
+    index('ai_runs_agent_created_at_idx').on(table.agentId, table.createdAt),
+    index('ai_runs_conversation_created_at_idx').on(table.conversationId, table.createdAt),
+    index('ai_runs_request_id_idx').on(table.requestId),
+    index('ai_runs_status_created_at_idx').on(table.status, table.createdAt),
+    check(
+        'ai_runs_status_check',
+        sql`${table.status} in ('running', 'success', 'error', 'aborted')`,
+    ),
+    check('ai_runs_duration_check', sql`${table.durationMs} is null or ${table.durationMs} >= 0`),
+    check('ai_runs_step_count_check', sql`${table.stepCount} >= 0`),
+    check('ai_runs_tool_call_count_check', sql`${table.toolCallCount} >= 0`),
+])
+
+export const aiSpans = pgTable('ai_spans', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    runId: uuid('run_id')
+        .references(() => aiRuns.id, {onDelete: 'cascade'})
+        .notNull(),
+    spanKey: varchar('span_key', {length: 255}).notNull(),
+    parentSpanKey: varchar('parent_span_key', {length: 255}),
+    kind: varchar('kind', {length: 20}).notNull(),
+    name: varchar('name', {length: 255}).notNull(),
+    status: varchar('status', {length: 20}).default('running').notNull(),
+    stepNumber: integer('step_number'),
+    toolCallId: varchar('tool_call_id', {length: 255}),
+    modelProvider: varchar('model_provider', {length: 100}),
+    modelId: varchar('model_id', {length: 255}),
+    inputSnapshot: jsonb('input_snapshot'),
+    outputSnapshot: jsonb('output_snapshot'),
+    metadata: jsonb('metadata'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    totalTokens: integer('total_tokens'),
+    finishReason: varchar('finish_reason', {length: 100}),
+    errorName: varchar('error_name', {length: 255}),
+    errorMessage: text('error_message'),
+    startedAt: timestamp('started_at', {withTimezone: true}).defaultNow().notNull(),
+    finishedAt: timestamp('finished_at', {withTimezone: true}),
+    durationMs: integer('duration_ms'),
+    createdAt: createdAt(),
+}, (table) => [
+    uniqueIndex('ai_spans_run_span_key_uidx').on(table.runId, table.spanKey),
+    index('ai_spans_run_started_at_idx').on(table.runId, table.startedAt),
+    index('ai_spans_kind_status_idx').on(table.kind, table.status),
+    index('ai_spans_tool_call_id_idx').on(table.toolCallId),
+    check(
+        'ai_spans_kind_check',
+        sql`${table.kind} in ('generation', 'step', 'tool')`,
+    ),
+    check(
+        'ai_spans_status_check',
+        sql`${table.status} in ('running', 'success', 'error', 'aborted')`,
+    ),
+    check('ai_spans_duration_check', sql`${table.durationMs} is null or ${table.durationMs} >= 0`),
 ])
 
 export const auditLogs = pgTable('audit_logs', {
