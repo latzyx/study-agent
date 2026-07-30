@@ -56,4 +56,6 @@ export const authPlugin = new Elysia({name: 'auth-plugin'})
     .use(jwt({
         name: 'JWT',
         secret: env.auth.jwtSecret,
+        iss: env.auth.issuer,
+        aud: env.auth.audience,
     }))
