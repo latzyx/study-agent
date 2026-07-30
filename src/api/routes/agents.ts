@@ -1,15 +1,31 @@
 import {Elysia, t} from 'elysia'
-import {eq, desc, sql} from 'drizzle-orm'
+import {and, desc, eq, sql} from 'drizzle-orm'
 import {db} from '../../db/index.js'
 import {agents} from '../../db/schema.js'
-import {createAgentBody, updateAgentBody, agentResponse, agentListQuery} from '../schemas/agent.js'
-import {authPlugin} from '../middleware/auth.js'
+import {createAgentBody, updateAgentBody, agentListQuery} from '../schemas/agent.js'
+import {
+    authenticateAccessToken,
+    authPlugin,
+    unauthorizedResponse,
+} from '../middleware/auth.js'
 
-async function requireUser(JWT: any, auth: any) {
-    if (!auth?.value) throw new Error('Unauthorized')
-    const payload = await JWT.verify(auth.value)
-    if (!payload) throw new Error('Unauthorized')
-    return payload as {sub: string; username: string}
+function notFoundResponse(): Response {
+    return Response.json(
+        {success: false, error: {code: 'NOT_FOUND', message: 'Agent not found'}},
+        {status: 404},
+    )
+}
+
+function serializeAgent(agent: typeof agents.$inferSelect) {
+    return {
+        ...agent,
+        tools: agent.tools ?? [],
+        description: agent.description ?? undefined,
+        systemPrompt: agent.systemPrompt ?? undefined,
+        createdBy: agent.createdBy ?? undefined,
+        createdAt: agent.createdAt.toISOString(),
+        updatedAt: agent.updatedAt.toISOString(),
+    }
 }
 
 export const agentRoutes = new Elysia({prefix: '/agents'})
@@ -17,35 +33,40 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .get(
         '/',
         async ({JWT, cookie: {auth}, query}) => {
-            const user = await requireUser(JWT, auth)
+            const user = await authenticateAccessToken(JWT, auth)
+            if (!user) return unauthorizedResponse()
+
             const page = query.page ?? 1
             const pageSize = query.pageSize ?? 20
             const offset = (page - 1) * pageSize
+            const ownedByUser = eq(agents.createdBy, user.sub)
 
-            const [countResult] = await db.select({count: sql<number>`count(*)::int`}).from(agents)
-            const items = await db.select().from(agents).orderBy(desc(agents.createdAt)).limit(pageSize).offset(offset)
+            const [countResult] = await db.select({count: sql<number>`count(*)::int`})
+                .from(agents)
+                .where(ownedByUser)
+            const items = await db.select()
+                .from(agents)
+                .where(ownedByUser)
+                .orderBy(desc(agents.createdAt))
+                .limit(pageSize)
+                .offset(offset)
 
             return {
                 success: true,
-                data: items.map((a) => ({
-                    ...a,
-                    tools: (a.tools as string[]) ?? [],
-                    createdAt: a.createdAt.toISOString(),
-                    updatedAt: a.updatedAt.toISOString(),
-                    createdBy: a.createdBy ?? undefined,
-                })),
+                data: items.map(serializeAgent),
                 pagination: {page, pageSize, total: countResult?.count ?? 0},
             }
         },
         {
             query: agentListQuery,
-            detail: {summary: 'List all agents', security: [{BearerAuth: []}]},
+            detail: {summary: 'List current user agents', security: [{BearerAuth: []}]},
         },
     )
     .post(
         '/',
         async ({body, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
+            const user = await authenticateAccessToken(JWT, auth)
+            if (!user) return unauthorizedResponse()
 
             const [newAgent] = await db.insert(agents).values({
                 name: body.name,
@@ -58,22 +79,13 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             }).returning()
 
             if (!newAgent) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'CREATE_FAILED', message: 'Failed to create agent'}}),
-                    {status: 500, headers: {'Content-Type': 'application/json'}},
+                return Response.json(
+                    {success: false, error: {code: 'CREATE_FAILED', message: 'Failed to create agent'}},
+                    {status: 500},
                 )
             }
 
-            return {
-                success: true,
-                data: {
-                    ...newAgent,
-                    tools: (newAgent.tools as string[]) ?? [],
-                    createdAt: newAgent.createdAt.toISOString(),
-                    updatedAt: newAgent.updatedAt.toISOString(),
-                    createdBy: newAgent.createdBy ?? undefined,
-                },
-            }
+            return {success: true, data: serializeAgent(newAgent)}
         },
         {
             body: createAgentBody,
@@ -82,53 +94,30 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     )
     .get(
         '/:id',
-        async ({params}) => {
-            const [agent] = await db.select().from(agents).where(eq(agents.id, params.id)).limit(1)
+        async ({params, JWT, cookie: {auth}}) => {
+            const user = await authenticateAccessToken(JWT, auth)
+            if (!user) return unauthorizedResponse()
 
-            if (!agent) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'Agent not found'}}),
-                    {status: 404, headers: {'Content-Type': 'application/json'}},
-                )
-            }
+            const [agent] = await db.select().from(agents).where(and(
+                eq(agents.id, params.id),
+                eq(agents.createdBy, user.sub),
+            )).limit(1)
 
-            return {
-                success: true,
-                data: {
-                    ...agent,
-                    tools: (agent.tools as string[]) ?? [],
-                    createdAt: agent.createdAt.toISOString(),
-                    updatedAt: agent.updatedAt.toISOString(),
-                    createdBy: agent.createdBy ?? undefined,
-                },
-            }
+            if (!agent) return notFoundResponse()
+            return {success: true, data: serializeAgent(agent)}
         },
         {
-            params: t.Object({id: t.String()}),
-            detail: {summary: 'Get agent by ID'},
+            params: t.Object({id: t.String({format: 'uuid'})}),
+            detail: {summary: 'Get agent by ID', security: [{BearerAuth: []}]},
         },
     )
     .put(
         '/:id',
         async ({params, body, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [existing] = await db.select().from(agents).where(eq(agents.id, params.id)).limit(1)
+            const user = await authenticateAccessToken(JWT, auth)
+            if (!user) return unauthorizedResponse()
 
-            if (!existing) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'Agent not found'}}),
-                    {status: 404, headers: {'Content-Type': 'application/json'}},
-                )
-            }
-
-            if (existing.createdBy !== user.sub) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'FORBIDDEN', message: 'Not the owner'}}),
-                    {status: 403, headers: {'Content-Type': 'application/json'}},
-                )
-            }
-
-            const updateData: Record<string, unknown> = {updatedAt: new Date()}
+            const updateData: Partial<typeof agents.$inferInsert> = {updatedAt: new Date()}
             if (body.name !== undefined) updateData.name = body.name
             if (body.description !== undefined) updateData.description = body.description
             if (body.systemPrompt !== undefined) updateData.systemPrompt = body.systemPrompt
@@ -136,28 +125,16 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             if (body.maxSteps !== undefined) updateData.maxSteps = body.maxSteps
             if (body.tools !== undefined) updateData.tools = body.tools
 
-            const [updated] = await db.update(agents).set(updateData).where(eq(agents.id, params.id)).returning()
+            const [updated] = await db.update(agents)
+                .set(updateData)
+                .where(and(eq(agents.id, params.id), eq(agents.createdBy, user.sub)))
+                .returning()
 
-            if (!updated) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'UPDATE_FAILED', message: 'Failed to update'}}),
-                    {status: 500, headers: {'Content-Type': 'application/json'}},
-                )
-            }
-
-            return {
-                success: true,
-                data: {
-                    ...updated,
-                    tools: (updated.tools as string[]) ?? [],
-                    createdAt: updated.createdAt.toISOString(),
-                    updatedAt: updated.updatedAt.toISOString(),
-                    createdBy: updated.createdBy ?? undefined,
-                },
-            }
+            if (!updated) return notFoundResponse()
+            return {success: true, data: serializeAgent(updated)}
         },
         {
-            params: t.Object({id: t.String()}),
+            params: t.Object({id: t.String({format: 'uuid'})}),
             body: updateAgentBody,
             detail: {summary: 'Update an agent', security: [{BearerAuth: []}]},
         },
@@ -165,28 +142,18 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
     .delete(
         '/:id',
         async ({params, JWT, cookie: {auth}}) => {
-            const user = await requireUser(JWT, auth)
-            const [existing] = await db.select().from(agents).where(eq(agents.id, params.id)).limit(1)
+            const user = await authenticateAccessToken(JWT, auth)
+            if (!user) return unauthorizedResponse()
 
-            if (!existing) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'NOT_FOUND', message: 'Agent not found'}}),
-                    {status: 404, headers: {'Content-Type': 'application/json'}},
-                )
-            }
+            const [deleted] = await db.delete(agents)
+                .where(and(eq(agents.id, params.id), eq(agents.createdBy, user.sub)))
+                .returning({id: agents.id})
 
-            if (existing.createdBy !== user.sub) {
-                return new Response(
-                    JSON.stringify({success: false, error: {code: 'FORBIDDEN', message: 'Not the owner'}}),
-                    {status: 403, headers: {'Content-Type': 'application/json'}},
-                )
-            }
-
-            await db.delete(agents).where(eq(agents.id, params.id))
+            if (!deleted) return notFoundResponse()
             return {success: true}
         },
         {
-            params: t.Object({id: t.String()}),
+            params: t.Object({id: t.String({format: 'uuid'})}),
             detail: {summary: 'Delete an agent', security: [{BearerAuth: []}]},
         },
     )
