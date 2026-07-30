@@ -176,6 +176,33 @@ describe('BaseAgent', () => {
         expect(provider.requests[0]?.tools?.map((tool) => tool.name)).toEqual(['add', 'multiply'])
     })
 
+    test('bounds history and forwards the configured provider timeout', async () => {
+        const provider = new FakeLLMProvider()
+        const contexts: ToolContext[] = []
+        const agent = new TestAgent(
+            {...config, maxHistoryMessages: 1, llmTimeoutMs: 1_234},
+            provider,
+            new ToolRegistry(),
+            [
+                createMathTool('add', (a, b) => a + b, contexts),
+                createMathTool('multiply', (a, b) => a * b, contexts),
+            ],
+        )
+
+        for await (const _event of agent.run('继续计算', {
+            history: [
+                {role: 'user', content: '旧消息'},
+                {role: 'assistant', content: '最新消息'},
+            ],
+        })) {
+            // consume stream
+        }
+
+        expect(provider.requests[0]?.timeoutMs).toBe(1_234)
+        expect(provider.requests[0]?.messages).not.toContainEqual({role: 'user', content: '旧消息'})
+        expect(provider.requests[0]?.messages).toContainEqual({role: 'assistant', content: '最新消息'})
+    })
+
     test('rejects empty input before calling the model', async () => {
         const provider = new FakeLLMProvider()
         const agent = new TestAgent(config, provider, new ToolRegistry(), [])
@@ -186,6 +213,17 @@ describe('BaseAgent', () => {
         expect(provider.requests).toHaveLength(0)
         expect(events).toHaveLength(1)
         expect(events[0]?.type).toBe('error')
+    })
+
+    test('rejects invalid runtime guardrail configuration', async () => {
+        const provider = new FakeLLMProvider()
+        const agent = new TestAgent({...config, maxSteps: 0}, provider, new ToolRegistry(), [])
+        const events: AgentEvent[] = []
+
+        for await (const event of agent.run('test')) events.push(event)
+
+        expect(provider.requests).toHaveLength(0)
+        expect(events[0]?.error?.message).toBe('maxSteps must be a positive integer')
     })
 })
 
