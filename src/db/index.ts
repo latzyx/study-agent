@@ -1,8 +1,23 @@
 import {drizzle} from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
+import {env} from '../config/env.js'
 import * as schema from './schema.js'
 
-const connectionString = process.env.DATABASE_URL!
+export const sql = postgres(env.database.url, {
+    max: env.database.maxConnections,
+    idle_timeout: env.database.idleTimeoutSeconds,
+    connect_timeout: env.database.connectTimeoutSeconds,
+    connection: {
+        application_name: 'study-agent',
+    },
+})
 
-const client = postgres(connectionString)
-export const db = drizzle(client, {schema})
+export const db = drizzle(sql, {schema})
+
+export async function checkDatabaseConnection(): Promise<void> {
+    await sql`select 1`
+}
+
+export async function closeDatabaseConnection(): Promise<void> {
+    await sql.end({timeout: env.database.shutdownTimeoutSeconds})
+}
