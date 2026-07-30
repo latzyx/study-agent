@@ -1,8 +1,10 @@
 import {env} from '../config/env.js'
-import {closeDatabaseConnection} from '../db/index.js'
+import {checkDatabaseReadiness, closeDatabaseConnection} from '../db/index.js'
 import {startAiTraceMaintenance} from '../services/ai-trace-maintenance-service.js'
 import {backgroundTaskStats, drainBackgroundTasks} from '../services/background-task-service.js'
 import {createApp} from './create-app.js'
+
+await checkDatabaseReadiness()
 
 const app = createApp().listen({
     port: env.server.port,
