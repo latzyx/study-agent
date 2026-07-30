@@ -39,6 +39,11 @@ function normalizeScore(score: number): number {
     return Math.max(0, Math.min(1, score))
 }
 
+function testPattern(pattern: RegExp, text: string): boolean {
+    pattern.lastIndex = 0
+    return pattern.test(text)
+}
+
 export class KeywordIntentClassifier implements IntentClassifier {
     readonly name = 'keyword-rules'
     readonly weight = 1
@@ -52,12 +57,12 @@ export class KeywordIntentClassifier implements IntentClassifier {
 
         const signals: IntentClassifierSignal[] = []
         for (const rule of rules) {
-            const matches = rule.patterns.filter((pattern) => pattern.test(text)).length
-            if (matches === 0) continue
+            const matchCount = rule.patterns.filter((pattern) => testPattern(pattern, text)).length
+            if (matchCount === 0) continue
 
             signals.push({
                 agentKey: rule.agentKey,
-                score: normalizeScore(rule.score + Math.min(0.06, (matches - 1) * 0.03)),
+                score: normalizeScore(rule.score + Math.min(0.06, (matchCount - 1) * 0.03)),
                 reason: rule.reason,
             })
         }
