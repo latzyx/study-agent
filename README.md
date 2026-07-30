@@ -93,6 +93,36 @@ bun run cli
 
 交互模式输入 `/exit` 或 `/quit` 退出。CLI 不依赖数据库。
 
+## Agent Runtime Factory
+
+Chat 不直接创建 Provider、解析模型或注册 Tool，而是通过：
+
+```text
+src/agent/runtime/agent-runtime-factory.ts
+```
+
+从一次 Agent 配置快照生成不可变 Runtime 描述：
+
+```text
+Agent 配置快照
+→ 归一化和校验
+→ 推导 Agent owner
+→ 解析 owner 范围内的 Tool
+→ 解析 provider:model
+→ 创建独立 Provider 和 ToolRegistry
+→ 返回 AgentRuntimeDescriptor
+```
+
+Factory 的模型解析、Tool 解析、Provider 和 Registry 创建函数均可注入。后续接入以下能力时不需要修改 Chat 主流程：
+
+- Agent 配置版本快照
+- 租户级 Provider
+- 远程模型网关
+- 沙箱 ToolRegistry
+- MCP Tool Adapter
+- 测试 Runtime
+- 分布式 Agent Runtime
+
 ## Agent 与 Tool 目录
 
 专业 Tool 必须放在所属 Agent 目录：
@@ -155,7 +185,7 @@ src/intent/
 
 当前 Chat API 仍使用数据库 `agentId` 作为执行目标。自动分发前必须建立明确的 `agentKey → agentId` 绑定，禁止找不到映射时偷偷使用默认 Agent。
 
-## 会话规则
+## 会话和执行完整性
 
 - Agent、会话和消息按用户隔离。
 - 同一用户的 `sessionId` 全局唯一。
@@ -164,6 +194,24 @@ src/intent/
 - 执行成功后，user、assistant 和 tool 消息在同一事务写入。
 - 模型失败、Tool 失败或请求中止时，不写入不完整对话回合。
 - Tool 历史按标准 assistant tool-call 和 tool-result 消息恢复。
+- 历史查询会向前扩展并从完整 user 回合边界开始，避免从孤立 tool 消息开始。
+- 无匹配 Tool call 的 result、重复 result 和未完成 Tool call 会被拒绝。
+- Provider 流必须显式发出 `finish`；流被截断时不会伪造成功。
+- 空 assistant 输出不会写入数据库。
+
+## Agent 错误分类
+
+Agent Runtime 不再把所有异常统一返回 502：
+
+- 请求中止：`499 REQUEST_ABORTED`
+- Provider 超时：`504 LLM_TIMEOUT`
+- Provider 限流：`429 LLM_RATE_LIMITED`
+- Provider 不可用：`503 LLM_PROVIDER_UNAVAILABLE`
+- Provider 认证失败：`502 LLM_PROVIDER_AUTHENTICATION_FAILED`
+- Runtime 请求配置非法：`500 INVALID_LLM_RUNTIME_REQUEST`
+- 超过 Agent 步骤限制：`422 AGENT_MAX_STEPS_EXCEEDED`
+
+生产环境仍会隐藏 Provider 和内部实现细节。
 
 ## 认证
 
