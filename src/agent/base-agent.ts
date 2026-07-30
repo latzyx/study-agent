@@ -52,7 +52,7 @@ export abstract class BaseAgent implements Agent {
         const tools = [...agentTools.values()].map((tool) => ({
             name: tool.name,
             description: tool.description,
-            inputSchema: tool.inputSchema as any,
+            inputSchema: tool.inputSchema,
         }))
         const maxSteps = this.config.maxSteps ?? 5
         const model = this.config.modelId ?? this.config.modelProfile
