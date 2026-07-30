@@ -21,6 +21,17 @@ function normalizePositiveInteger(value: number | undefined, fallback: number, n
     return value
 }
 
+function normalizeOptionalPositiveInteger(value: number | undefined, name: string): number | undefined {
+    if (value === undefined) return undefined
+    return normalizePositiveInteger(value, value, name)
+}
+
+function normalizeRequiredString(value: string | undefined, name: string): string {
+    const normalized = value?.trim()
+    if (!normalized) throw new Error(`${name} must be configured`)
+    return normalized
+}
+
 function serializeToolResult(result: unknown, maxChars: number): string {
     const seen = new WeakSet<object>()
     let serialized: string
@@ -59,14 +70,23 @@ export abstract class BaseAgent implements Agent {
         protected readonly toolRegistry: ToolRegistry,
     ) {}
 
-    abstract getTools(): Tool[]
+    getTools(): Tool[] {
+        return this.config.tools ? [...this.config.tools] : []
+    }
 
     private ensureToolsRegistered(): ReadonlyMap<string, Tool> {
         if (this.toolsRegistered && this.agentTools) return this.agentTools
 
         const tools = this.getTools()
-        const toolMap = new Map<string, Tool>()
+        if (this.config.tools !== undefined && tools !== this.config.tools) {
+            const configuredNames = this.config.tools.map((tool) => tool.name)
+            const resolvedNames = tools.map((tool) => tool.name)
+            if (configuredNames.join('\u0000') !== resolvedNames.join('\u0000')) {
+                throw new Error('Agent config.tools conflicts with getTools(); use one authoritative tool source')
+            }
+        }
 
+        const toolMap = new Map<string, Tool>()
         for (const tool of tools) {
             if (toolMap.has(tool.name)) {
                 throw new Error(`Agent tool declared more than once: ${tool.name}`)
@@ -82,9 +102,15 @@ export abstract class BaseAgent implements Agent {
     }
 
     async *run(input: string, options: AgentRunOptions = {}): AsyncGenerator<AgentEvent> {
-        const agentTools = this.ensureToolsRegistered()
-        const normalizedInput = input.trim()
+        let agentTools: ReadonlyMap<string, Tool>
+        try {
+            agentTools = this.ensureToolsRegistered()
+        } catch (error) {
+            yield {type: 'error', error: error instanceof Error ? error : new Error(String(error))}
+            return
+        }
 
+        const normalizedInput = input.trim()
         if (!normalizedInput) {
             yield {type: 'error', error: new Error('Agent input cannot be empty')}
             return
@@ -98,6 +124,8 @@ export abstract class BaseAgent implements Agent {
         let maxSteps: number
         let maxHistoryMessages: number
         let maxToolResultChars: number
+        let llmTimeoutMs: number | undefined
+        let model: string
 
         try {
             maxSteps = normalizePositiveInteger(this.config.maxSteps, DEFAULT_MAX_STEPS, 'maxSteps')
@@ -111,6 +139,8 @@ export abstract class BaseAgent implements Agent {
                 DEFAULT_MAX_TOOL_RESULT_CHARS,
                 'maxToolResultChars',
             )
+            llmTimeoutMs = normalizeOptionalPositiveInteger(this.config.llmTimeoutMs, 'llmTimeoutMs')
+            model = normalizeRequiredString(this.config.modelId, 'modelId')
         } catch (error) {
             yield {type: 'error', error: error instanceof Error ? error : new Error(String(error))}
             return
@@ -129,7 +159,6 @@ export abstract class BaseAgent implements Agent {
             description: tool.description,
             inputSchema: tool.inputSchema,
         }))
-        const model = this.config.modelId ?? this.config.modelProfile
 
         for (let step = 1; step <= maxSteps; step++) {
             const pendingToolCalls: LLMToolCall[] = []
@@ -142,7 +171,7 @@ export abstract class BaseAgent implements Agent {
                 messages,
                 tools,
                 abortSignal: options.abortSignal,
-                timeoutMs: this.config.llmTimeoutMs,
+                timeoutMs: llmTimeoutMs,
             })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
