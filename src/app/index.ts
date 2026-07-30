@@ -1,40 +1,46 @@
-import {Elysia} from 'elysia'
-import {jwt} from '@elysiajs/jwt'
-import {cors} from '@elysiajs/cors'
-import {swagger} from '@elysiajs/swagger'
-import {
-    authRoutes,
-    agentRoutes,
-    chatRoutes,
-    adminRoutes,
-    fileRoutes,
-    healthRoutes,
-} from '../api/routes/index.js'
+import {env} from '../config/env.js'
+import {closeDatabaseConnection} from '../db/index.js'
+import {createApp} from './create-app.js'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret'
+const app = createApp().listen({
+    port: env.server.port,
+    hostname: env.server.host,
+})
 
-const app = new Elysia()
-    .use(cors({origin: true, credentials: true}))
-    .use(jwt({name: 'JWT', secret: JWT_SECRET}))
-    .use(swagger({
-        path: '/docs',
-        documentation: {
-            info: {title: 'Study Agent API', version: '1.0.0', description: 'Multi-agent AI system API'},
-            components: {securitySchemes: {BearerAuth: {type: 'http', scheme: 'bearer', bearerFormat: 'JWT'}}},
-        },
-    }))
-    .group('/api/v1', (app) =>
-        app
-            .use(authRoutes)
-            .use(agentRoutes)
-            .use(chatRoutes)
-            .use(adminRoutes)
-            .use(fileRoutes)
-            .use(healthRoutes),
-    )
-    .listen(3000)
+let shutdownPromise: Promise<void> | null = null
+
+async function shutdown(signal: NodeJS.Signals): Promise<void> {
+    if (shutdownPromise) return shutdownPromise
+
+    shutdownPromise = (async () => {
+        console.log(`[shutdown] Received ${signal}; stopping HTTP server`)
+        await app.stop()
+
+        console.log('[shutdown] Closing database connections')
+        await closeDatabaseConnection()
+
+        console.log('[shutdown] Complete')
+    })()
+
+    return shutdownPromise
+}
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+        void shutdown(signal)
+            .then(() => {
+                process.exitCode = 0
+            })
+            .catch((error) => {
+                console.error('[shutdown] Failed', error)
+                process.exitCode = 1
+            })
+    })
+}
 
 console.log(
-    `🦊 Elysia 正在运行在 ${app.server?.hostname}:${app.server?.port}`,
-    `\n📖 Swagger 文档: http://${app.server?.hostname}:${app.server?.port}/docs`,
+    `Study Agent API: http://${app.server?.hostname}:${app.server?.port}`,
+    `\nSwagger: http://${app.server?.hostname}:${app.server?.port}/docs`,
 )
+
+export {app}

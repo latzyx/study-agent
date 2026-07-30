@@ -1,16 +1,13 @@
 import {t} from 'elysia'
 
-export const chatBody = t.Object({
-    agentId: t.String(),
-    message: t.String({minLength: 1}),
-    sessionId: t.Optional(t.String()),
+const chatRequestBody = t.Object({
+    agentId: t.String({format: 'uuid'}),
+    message: t.String({minLength: 1, maxLength: 20_000}),
+    sessionId: t.Optional(t.String({minLength: 1, maxLength: 100})),
 })
 
-export const chatStreamBody = t.Object({
-    agentId: t.String(),
-    message: t.String({minLength: 1}),
-    sessionId: t.Optional(t.String()),
-})
+export const chatBody = chatRequestBody
+export const chatStreamBody = chatRequestBody
 
 export const chatResponse = t.Object({
     success: t.Boolean(),
@@ -36,5 +33,5 @@ export const messageResponse = t.Object({
 })
 
 export const historyParams = t.Object({
-    sessionId: t.String(),
+    sessionId: t.String({minLength: 1, maxLength: 100}),
 })

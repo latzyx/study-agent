@@ -1,9 +1,14 @@
 import {t} from 'elysia'
 
+const agentTools = t.Array(
+    t.String({minLength: 1, maxLength: 100}),
+    {maxItems: 50},
+)
+
 export const createAgentBody = t.Object({
     name: t.String({minLength: 1, maxLength: 100}),
-    description: t.Optional(t.String()),
-    systemPrompt: t.Optional(t.String()),
+    description: t.Optional(t.String({maxLength: 2_000})),
+    systemPrompt: t.Optional(t.String({maxLength: 20_000})),
     modelProfile: t.Optional(
         t.Union(
             [
@@ -16,13 +21,13 @@ export const createAgentBody = t.Object({
         ),
     ),
     maxSteps: t.Optional(t.Number({minimum: 1, maximum: 50, default: 5})),
-    tools: t.Optional(t.Array(t.String())),
+    tools: t.Optional(agentTools),
 })
 
 export const updateAgentBody = t.Object({
     name: t.Optional(t.String({minLength: 1, maxLength: 100})),
-    description: t.Optional(t.String()),
-    systemPrompt: t.Optional(t.String()),
+    description: t.Optional(t.String({maxLength: 2_000})),
+    systemPrompt: t.Optional(t.String({maxLength: 20_000})),
     modelProfile: t.Optional(
         t.Union([
             t.Literal('fast'),
@@ -32,7 +37,7 @@ export const updateAgentBody = t.Object({
         ]),
     ),
     maxSteps: t.Optional(t.Number({minimum: 1, maximum: 50})),
-    tools: t.Optional(t.Array(t.String())),
+    tools: t.Optional(agentTools),
 })
 
 export const agentResponse = t.Object({
@@ -49,6 +54,6 @@ export const agentResponse = t.Object({
 })
 
 export const agentListQuery = t.Object({
-    page: t.Optional(t.Number({default: 1})),
-    pageSize: t.Optional(t.Number({default: 20, maximum: 100})),
+    page: t.Optional(t.Number({default: 1, minimum: 1})),
+    pageSize: t.Optional(t.Number({default: 20, minimum: 1, maximum: 100})),
 })

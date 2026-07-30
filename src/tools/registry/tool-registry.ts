@@ -1,45 +1,31 @@
-import type {Tool} from "../domain/tool";
-import type {LLMToolCall} from "../../llm/domain/llm-provider";
+import type {Tool, ToolContext} from '../domain/tool'
+import type {LLMToolCall} from '../../llm/domain/llm-provider'
 
 export class ToolRegistry {
-    private readonly tools =
-        new Map<string, Tool>();
+    private readonly tools = new Map<string, Tool>()
 
     register(tool: Tool): void {
-        // 如果工具已存在，跳过注册
-        if (this.tools.has(tool.name)) {
-            return;
-        }
+        const existing = this.tools.get(tool.name)
+        if (existing === tool) return
+        if (existing) throw new Error(`Tool already registered: ${tool.name}`)
 
-        this.tools.set(tool.name, tool);
+        this.tools.set(tool.name, tool)
     }
 
     get(name: string): Tool {
-        const tool = this.tools.get(name);
+        const tool = this.tools.get(name)
+        if (!tool) throw new Error(`Unknown tool: ${name}`)
 
-        if (!tool) {
-            throw new Error(
-                `Unknown tool: ${name}`,
-            );
-        }
-
-        return tool;
+        return tool
     }
 
-    async execute(
-        call: LLMToolCall,
-    ): Promise<unknown> {
-        const tool = this.get(call.name);
-
-        // 确保 input 不是空对象
-        const input = call.input && Object.keys(call.input).length > 0
-            ? tool.inputSchema.parse(call.input)
-            : call.input;
-
-        return tool.execute(input, {});
+    async execute(call: LLMToolCall, context: ToolContext = {}): Promise<unknown> {
+        const tool = this.get(call.name)
+        const input = tool.inputSchema.parse(call.input)
+        return tool.execute(input, context)
     }
 
     list(): Tool[] {
-        return [...this.tools.values()];
+        return [...this.tools.values()]
     }
 }
