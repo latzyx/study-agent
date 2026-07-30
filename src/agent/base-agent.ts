@@ -1,6 +1,6 @@
 import type {Agent, AgentConfig, AgentEvent, AgentRunOptions} from './types/agent'
+import type {LLMProvider, LLMToolCall, LLMUsage} from '../llm/domain/llm-provider'
 import type {Tool} from '../tools/domain/tool'
-import type {LLMProvider} from '../llm/domain/llm-provider'
 import type {ToolRegistry} from '../tools/registry/tool-registry'
 
 export abstract class BaseAgent implements Agent {
@@ -33,8 +33,9 @@ export abstract class BaseAgent implements Agent {
         const model = this.config.modelId ?? this.config.modelProfile
 
         for (let step = 1; step <= maxSteps; step++) {
-            let hasToolCall = false
+            const pendingToolCalls: LLMToolCall[] = []
             let fullText = ''
+            let usage: LLMUsage | undefined
 
             for await (const event of this.llmProvider.stream({
                 model,
@@ -49,44 +50,19 @@ export abstract class BaseAgent implements Agent {
                 }
 
                 if (event.type === 'tool-call') {
-                    hasToolCall = true
+                    pendingToolCalls.push(event.toolCall)
                     yield {type: 'tool-call', toolCall: event.toolCall}
+                    continue
+                }
 
-                    try {
-                        const result = await this.toolRegistry.execute(event.toolCall, {
-                            ...options.toolContext,
-                            abortSignal: options.abortSignal,
-                        })
-                        yield {
-                            type: 'tool-result',
-                            toolResult: {
-                                toolCallId: event.toolCall.id,
-                                name: event.toolCall.name,
-                                result,
-                            },
-                        }
-
-                        if (fullText.trim()) {
-                            messages.push({role: 'assistant', content: fullText})
-                        }
-                        messages.push({
-                            role: 'user',
-                            content: `Tool ${event.toolCall.name} result: ${JSON.stringify(result)}`,
-                        })
-                    } catch (error) {
-                        yield {
-                            type: 'error',
-                            error: error instanceof Error ? error : new Error(String(error)),
-                        }
-                        return
-                    }
-
-                    break
+                if (event.type === 'usage') {
+                    usage = event.usage
+                    continue
                 }
 
                 if (event.type === 'finish') {
-                    yield {type: 'finish', usage: event.response.usage}
-                    return
+                    usage = event.response.usage ?? usage
+                    break
                 }
 
                 if (event.type === 'error') {
@@ -95,7 +71,41 @@ export abstract class BaseAgent implements Agent {
                 }
             }
 
-            if (!hasToolCall) return
+            if (pendingToolCalls.length === 0) {
+                yield {type: 'finish', usage}
+                return
+            }
+
+            if (fullText.trim()) {
+                messages.push({role: 'assistant', content: fullText})
+            }
+
+            for (const toolCall of pendingToolCalls) {
+                try {
+                    const result = await this.toolRegistry.execute(toolCall, {
+                        ...options.toolContext,
+                        abortSignal: options.abortSignal,
+                    })
+                    yield {
+                        type: 'tool-result',
+                        toolResult: {
+                            toolCallId: toolCall.id,
+                            name: toolCall.name,
+                            result,
+                        },
+                    }
+                    messages.push({
+                        role: 'user',
+                        content: `Tool ${toolCall.name} result: ${JSON.stringify(result)}`,
+                    })
+                } catch (error) {
+                    yield {
+                        type: 'error',
+                        error: error instanceof Error ? error : new Error(String(error)),
+                    }
+                    return
+                }
+            }
         }
 
         yield {
