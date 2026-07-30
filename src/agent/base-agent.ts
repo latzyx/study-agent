@@ -109,9 +109,11 @@ export abstract class BaseAgent implements Agent {
                 return
             }
 
-            if (fullText.trim()) {
-                messages.push({role: 'assistant', content: fullText})
-            }
+            messages.push({
+                role: 'assistant',
+                content: fullText,
+                toolCalls: pendingToolCalls,
+            })
 
             for (const toolCall of pendingToolCalls) {
                 try {
