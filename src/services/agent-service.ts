@@ -34,7 +34,7 @@ export interface UpdateAgentInput {
     tools?: readonly string[]
 }
 
-interface AgentSnapshot {
+interface AgentSnapshot extends Record<string, unknown> {
     name: string
     description: string | null
     systemPrompt: string | null
