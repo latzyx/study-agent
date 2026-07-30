@@ -1,7 +1,7 @@
 import {and, asc, desc, eq} from 'drizzle-orm'
 import {BaseAgent} from '../agent/base-agent.js'
 import type {AgentConfig, AgentEvent} from '../agent/types/agent.js'
-import {createApiError} from '../api/errors/api-error.js'
+import {ApiError, createApiError} from '../api/errors/api-error.js'
 import {env} from '../config/env.js'
 import {db} from '../db/index.js'
 import {agents, conversations, messages} from '../db/schema.js'
@@ -18,7 +18,13 @@ import {
     finishAiTrace,
 } from './ai-trace-service.js'
 import {findUserAgent} from './agent-service.js'
+import {commitSuccessfulChat} from './chat-commit-service.js'
 import {acquireChatExecutionLease, type ConcurrencyLease} from './chat-concurrency-service.js'
+import {
+    attachChatRequestExecution,
+    beginChatRequest,
+    failChatRequest,
+} from './chat-idempotency-service.js'
 
 const HISTORY_MESSAGE_LIMIT = 50
 
@@ -28,6 +34,7 @@ export interface ChatInput {
     message: string
     sessionId?: string
     requestId?: string
+    idempotencyKey?: string
     abortSignal?: AbortSignal
 }
 
@@ -43,6 +50,7 @@ export interface ChatResult {
     sessionId: string
     traceId?: string
     toolCalls: Array<Omit<ToolCallRecord, 'id'>>
+    replayed?: boolean
 }
 
 export type ChatStreamEvent =
@@ -50,7 +58,7 @@ export type ChatStreamEvent =
     | {type: 'tool-call'; id: string; name: string; args: unknown}
     | {type: 'tool-result'; id: string; name: string; result: unknown}
     | {type: 'finish'; usage?: LLMUsage}
-    | {type: 'done'; sessionId: string; traceId?: string}
+    | {type: 'done'; sessionId: string; traceId?: string; replayed?: boolean}
 
 interface PreparedExecution {
     agent: BaseAgent
@@ -58,6 +66,7 @@ interface PreparedExecution {
     history: LLMMessage[]
     lease: ConcurrencyLease
     trace?: DatabaseAgentTrace
+    requestRecordId?: string
 }
 
 interface ExecutionState {
@@ -75,6 +84,12 @@ function publicExecutionError(error?: Error): string {
 
 function normalizeError(error: unknown): Error {
     return error instanceof Error ? error : new Error(String(error))
+}
+
+function errorCode(error: unknown): string {
+    if (error instanceof ApiError) return error.code
+    if (error instanceof Error && error.name) return error.name
+    return 'CHAT_EXECUTION_FAILED'
 }
 
 function createAgentFromConfig(agentRow: typeof agents.$inferSelect): BaseAgent {
@@ -211,31 +226,6 @@ function ensureCompleteResponse(state: ExecutionState): void {
     throw createApiError(502, 'EMPTY_AGENT_RESPONSE', 'Agent completed without producing a response')
 }
 
-async function persistSuccessfulExchange(
-    conversationId: string,
-    inputMessage: string,
-    state: Pick<ExecutionState, 'reply' | 'toolCalls'>,
-): Promise<void> {
-    const userCreatedAt = new Date()
-    const assistantCreatedAt = new Date(userCreatedAt.getTime() + 1)
-
-    await db.transaction(async (tx) => {
-        await tx.insert(messages).values({
-            conversationId,
-            role: 'user',
-            content: inputMessage,
-            createdAt: userCreatedAt,
-        })
-        await tx.insert(messages).values({
-            conversationId,
-            role: 'assistant',
-            content: state.reply || null,
-            toolCalls: state.toolCalls.length > 0 ? state.toolCalls : null,
-            createdAt: assistantCreatedAt,
-        })
-    })
-}
-
 async function createTraceSafely(input: ChatInput, conversation: typeof conversations.$inferSelect) {
     if (!env.tracing.enabled) return undefined
 
@@ -253,6 +243,7 @@ async function createTraceSafely(input: ChatInput, conversation: typeof conversa
             },
             metadata: {
                 transport: input.requestId ? 'http' : 'internal',
+                idempotencyKeyPresent: Boolean(input.idempotencyKey),
             },
         })
     } catch (error) {
@@ -289,7 +280,10 @@ async function finishTraceSafely(
     }
 }
 
-async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
+async function prepareExecution(
+    input: ChatInput,
+    requestRecordId?: string,
+): Promise<PreparedExecution> {
     const agentRow = await findUserAgent(input.userId, input.agentId)
     const conversation = await getOrCreateConversation(
         input.userId,
@@ -302,12 +296,19 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
     try {
         const history = await loadConversationHistory(conversation.id)
         trace = await createTraceSafely(input, conversation)
+        await attachChatRequestExecution({
+            requestRecordId,
+            conversationId: conversation.id,
+            sessionId: conversation.sessionId,
+            traceId: trace?.traceId,
+        })
         return {
             agent: createAgentFromConfig(agentRow),
             conversation,
             history,
             lease,
             trace,
+            requestRecordId,
         }
     } catch (error) {
         if (trace) {
@@ -327,10 +328,48 @@ function createExecutionState(): ExecutionState {
     return {reply: '', toolCalls: [], stepCount: 0}
 }
 
-export async function executeChat(input: ChatInput): Promise<ChatResult> {
-    const execution = await prepareExecution(input)
-    const state = createExecutionState()
+async function claimChatRequest(input: ChatInput) {
+    return beginChatRequest({
+        userId: input.userId,
+        idempotencyKey: input.idempotencyKey,
+        agentId: input.agentId,
+        sessionId: input.sessionId,
+        message: input.message,
+    })
+}
 
+async function failClaim(
+    requestRecordId: string | undefined,
+    traceId: string | undefined,
+    input: ChatInput,
+    error: unknown,
+): Promise<void> {
+    const normalized = normalizeError(error)
+    await failChatRequest({
+        requestRecordId,
+        status: input.abortSignal?.aborted ? 'aborted' : 'error',
+        traceId,
+        errorCode: errorCode(error),
+        error: normalized,
+    }).catch((stateError) => {
+        console.error('[chat] Failed to finalize idempotent request state', stateError)
+    })
+}
+
+export async function executeChat(input: ChatInput): Promise<ChatResult> {
+    const claim = await claimChatRequest(input)
+    if (claim.kind === 'replay') return claim.result
+    const requestRecordId = claim.kind === 'execute' ? claim.requestRecordId : undefined
+
+    let execution: PreparedExecution
+    try {
+        execution = await prepareExecution(input, requestRecordId)
+    } catch (error) {
+        await failClaim(requestRecordId, undefined, input, error)
+        throw error
+    }
+
+    const state = createExecutionState()
     try {
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
@@ -352,14 +391,21 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
         }
 
         ensureCompleteResponse(state)
-        await persistSuccessfulExchange(execution.conversation.id, input.message, state)
-        await finishTraceSafely(execution.trace, state, 'success')
-        return {
+        const result: ChatResult = {
             reply: state.reply,
             sessionId: execution.conversation.sessionId,
             traceId: execution.trace?.traceId,
             toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
         }
+        await commitSuccessfulChat({
+            requestRecordId,
+            conversationId: execution.conversation.id,
+            inputMessage: input.message,
+            result,
+            toolCalls: state.toolCalls,
+        })
+        await finishTraceSafely(execution.trace, state, 'success')
+        return result
     } catch (error) {
         const normalizedError = normalizeError(error)
         await finishTraceSafely(
@@ -368,6 +414,7 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
             input.abortSignal?.aborted ? 'aborted' : 'error',
             normalizedError,
         )
+        await failClaim(requestRecordId, execution.trace?.traceId, input, error)
         throw error
     } finally {
         execution.lease.release()
@@ -375,9 +422,28 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
 }
 
 export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEvent> {
-    const execution = await prepareExecution(input)
-    const state = createExecutionState()
+    const claim = await claimChatRequest(input)
+    if (claim.kind === 'replay') {
+        if (claim.result.reply) yield {type: 'text-delta', content: claim.result.reply}
+        yield {
+            type: 'done',
+            sessionId: claim.result.sessionId,
+            traceId: claim.result.traceId,
+            replayed: true,
+        }
+        return
+    }
+    const requestRecordId = claim.kind === 'execute' ? claim.requestRecordId : undefined
 
+    let execution: PreparedExecution
+    try {
+        execution = await prepareExecution(input, requestRecordId)
+    } catch (error) {
+        await failClaim(requestRecordId, undefined, input, error)
+        throw error
+    }
+
+    const state = createExecutionState()
     try {
         for await (const event of execution.agent.run(input.message, {
             history: execution.history,
@@ -418,7 +484,19 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
         }
 
         ensureCompleteResponse(state)
-        await persistSuccessfulExchange(execution.conversation.id, input.message, state)
+        const result: ChatResult = {
+            reply: state.reply,
+            sessionId: execution.conversation.sessionId,
+            traceId: execution.trace?.traceId,
+            toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
+        }
+        await commitSuccessfulChat({
+            requestRecordId,
+            conversationId: execution.conversation.id,
+            inputMessage: input.message,
+            result,
+            toolCalls: state.toolCalls,
+        })
         await finishTraceSafely(execution.trace, state, 'success')
         if (!input.abortSignal?.aborted) {
             yield {
@@ -435,6 +513,7 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
             input.abortSignal?.aborted ? 'aborted' : 'error',
             normalizedError,
         )
+        await failClaim(requestRecordId, execution.trace?.traceId, input, error)
         throw error
     } finally {
         execution.lease.release()
