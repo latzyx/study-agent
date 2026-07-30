@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import {env} from '../../config/env.js'
 import {db} from '../../db/index.js'
 import {files} from '../../db/schema.js'
+import {recordAuditLog} from '../../services/audit-log-service.js'
 import {
     authenticateAccessToken,
     authPlugin,
@@ -42,7 +43,7 @@ export const fileRoutes = new Elysia({prefix: '/files'})
     .use(authPlugin)
     .post(
         '/upload',
-        async ({JWT, headers, body}) => {
+        async ({JWT, headers, body, request}) => {
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
@@ -72,6 +73,20 @@ export const fileRoutes = new Elysia({prefix: '/files'})
                 }).returning()
 
                 if (!saved) throw new Error('Failed to save file metadata')
+
+                await recordAuditLog({
+                    userId: user.sub,
+                    action: 'file.upload',
+                    resourceType: 'file',
+                    resourceId: saved.id,
+                    details: {
+                        filename: saved.filename,
+                        mimeType: saved.mimeType,
+                        size: saved.size,
+                    },
+                    request,
+                })
+
                 return {success: true, data: serializeFile(saved)}
             } catch (error) {
                 await unlink(storagePath).catch(() => undefined)
@@ -100,16 +115,35 @@ export const fileRoutes = new Elysia({prefix: '/files'})
     )
     .delete(
         '/:id',
-        async ({params, JWT, headers}) => {
+        async ({params, JWT, headers, request}) => {
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
             const file = await findOwnedFile(user.sub, params.id)
             if (!file) return apiError(404, 'NOT_FOUND', 'File not found')
 
-            await db.delete(files).where(and(eq(files.id, file.id), eq(files.userId, user.sub)))
+            const [deleted] = await db.delete(files)
+                .where(and(eq(files.id, file.id), eq(files.userId, user.sub)))
+                .returning({id: files.id})
+            if (!deleted) return apiError(404, 'NOT_FOUND', 'File not found')
+
             await unlink(file.storagePath).catch((error: NodeJS.ErrnoException) => {
-                if (error.code !== 'ENOENT') throw error
+                if (error.code !== 'ENOENT') {
+                    console.error('[files] Failed to remove stored file', {
+                        fileId: file.id,
+                        storagePath: file.storagePath,
+                        error,
+                    })
+                }
+            })
+
+            await recordAuditLog({
+                userId: user.sub,
+                action: 'file.delete',
+                resourceType: 'file',
+                resourceId: file.id,
+                details: {filename: file.filename, size: file.size},
+                request,
             })
 
             return {success: true}
