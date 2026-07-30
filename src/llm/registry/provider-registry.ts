@@ -45,5 +45,17 @@ export function resolveLanguageModel(modelId: string): LanguageModel {
         )
     }
 
-    return providerRegistry.languageModel(normalizedModelId as Parameters<typeof providerRegistry.languageModel>[0])
+    try {
+        return providerRegistry.languageModel(
+            normalizedModelId as Parameters<typeof providerRegistry.languageModel>[0],
+        )
+    } catch (error) {
+        if (error instanceof LLMProviderError) throw error
+        throw new LLMProviderError(
+            `Unknown or unavailable LLM model: ${normalizedModelId}`,
+            'INVALID_REQUEST',
+            false,
+            {cause: error},
+        )
+    }
 }
