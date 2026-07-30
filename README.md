@@ -213,6 +213,21 @@ Agent Runtime 不再把所有异常统一返回 502：
 
 生产环境仍会隐藏 Provider 和内部实现细节。
 
+## 后续升级边界
+
+当前架构已经为以下演进预留接口，但尚未偷偷启用：
+
+- `agentKey → agentId` 显式绑定与自动路由
+- MacBERT + Embedding + LLM 级联意图识别
+- Agent 配置不可变版本快照
+- Redis 分布式 session 租约和限流
+- Tool 幂等键、副作用声明和补偿动作
+- Tool 沙箱、权限策略和租户级凭据
+- Trace、指标、成本和 Token 预算治理
+- 多 Agent 编排中的循环检测和总执行预算
+
+这些能力应通过 Runtime Factory、IntentClassifier、Tool Registry Adapter 和独立策略层接入，不应重新把实现堆回 Chat Service。
+
 ## 认证
 
 接口只接受：
