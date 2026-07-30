@@ -114,7 +114,7 @@ export const auditLogs = pgTable('audit_logs', {
 
 export const operationLogs = pgTable('operation_logs', {
     id: uuid('id').defaultRandom().primaryKey(),
-    requestId: varchar('request_id', {length: 100}).notNull().unique(),
+    requestId: varchar('request_id', {length: 100}).notNull(),
     userId: uuid('user_id').references(() => users.id, {onDelete: 'set null'}),
     method: varchar('method', {length: 10}).notNull(),
     path: varchar('path', {length: 255}).notNull(),
@@ -124,6 +124,7 @@ export const operationLogs = pgTable('operation_logs', {
     userAgent: varchar('user_agent', {length: 500}),
     createdAt: createdAt(),
 }, (table) => [
+    index('operation_logs_request_id_idx').on(table.requestId),
     index('operation_logs_created_at_idx').on(table.createdAt),
     index('operation_logs_user_created_at_idx').on(table.userId, table.createdAt),
     index('operation_logs_path_created_at_idx').on(table.path, table.createdAt),
