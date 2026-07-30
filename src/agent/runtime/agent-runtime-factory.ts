@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto'
 import {BaseAgent} from '../base-agent.js'
 import type {AgentConfig, ModelProfile} from '../types/agent.js'
 import {
@@ -21,11 +22,24 @@ export interface AgentRuntimeConfigSnapshot {
     tools: readonly string[]
 }
 
+export interface ResolvedAgentRuntimeSnapshot {
+    name: string
+    description: string
+    systemPrompt: string
+    modelProfile: ModelProfile
+    modelId: string
+    maxSteps: number
+    agentKey: BuiltinAgentKey
+    toolNames: readonly string[]
+}
+
 export interface AgentRuntimeDescriptor {
     agent: BaseAgent
     agentKey: BuiltinAgentKey
     modelId: string
     toolNames: readonly string[]
+    snapshot: Readonly<ResolvedAgentRuntimeSnapshot>
+    fingerprint: string
 }
 
 export interface AgentRuntimeFactoryDependencies {
@@ -49,8 +63,23 @@ function normalizeSnapshot(snapshot: AgentRuntimeConfigSnapshot): AgentRuntimeCo
         name,
         description: snapshot.description?.trim() || null,
         systemPrompt: snapshot.systemPrompt?.trim() || null,
-        tools: [...new Set(snapshot.tools.map((name) => name.trim()).filter(Boolean))],
+        tools: [...new Set(snapshot.tools.map((toolName) => toolName.trim()).filter(Boolean))],
     }
+}
+
+function createFingerprint(snapshot: ResolvedAgentRuntimeSnapshot): string {
+    const canonical = JSON.stringify({
+        name: snapshot.name,
+        description: snapshot.description,
+        systemPrompt: snapshot.systemPrompt,
+        modelProfile: snapshot.modelProfile,
+        modelId: snapshot.modelId,
+        maxSteps: snapshot.maxSteps,
+        agentKey: snapshot.agentKey,
+        toolNames: [...snapshot.toolNames],
+    })
+
+    return createHash('sha256').update(canonical).digest('hex')
 }
 
 export class AgentRuntimeFactory {
@@ -70,21 +99,34 @@ export class AgentRuntimeFactory {
     }
 
     create(snapshotInput: AgentRuntimeConfigSnapshot): AgentRuntimeDescriptor {
-        const snapshot = normalizeSnapshot(snapshotInput)
-        const agentKey = this.inferAgentKey(snapshot.tools)
-        const tools = this.resolveTools(agentKey, snapshot.tools)
-        const modelId = this.resolveModelId(snapshot.modelProfile)
-        const config: AgentConfig = {
-            name: snapshot.name,
-            description: snapshot.description ?? '',
-            systemPrompt: snapshot.systemPrompt ?? 'You are a helpful assistant.',
-            modelProfile: snapshot.modelProfile,
-            modelId,
-            maxSteps: snapshot.maxSteps,
-            tools,
-        }
+        const normalized = normalizeSnapshot(snapshotInput)
+        const agentKey = this.inferAgentKey(normalized.tools)
+        const tools = this.resolveTools(agentKey, normalized.tools)
+        const modelId = this.resolveModelId(normalized.modelProfile).trim()
+        if (!modelId) throw new Error('Agent runtime modelId cannot be empty')
 
-        return {
+        const toolNames = Object.freeze(tools.map((tool) => tool.name))
+        const snapshot = Object.freeze<ResolvedAgentRuntimeSnapshot>({
+            name: normalized.name,
+            description: normalized.description ?? '',
+            systemPrompt: normalized.systemPrompt ?? 'You are a helpful assistant.',
+            modelProfile: normalized.modelProfile,
+            modelId,
+            maxSteps: normalized.maxSteps,
+            agentKey,
+            toolNames,
+        })
+        const config = Object.freeze<AgentConfig>({
+            name: snapshot.name,
+            description: snapshot.description,
+            systemPrompt: snapshot.systemPrompt,
+            modelProfile: snapshot.modelProfile,
+            modelId: snapshot.modelId,
+            maxSteps: snapshot.maxSteps,
+            tools: Object.freeze([...tools]) as Tool[],
+        })
+
+        return Object.freeze({
             agent: new (class extends BaseAgent {})(
                 config,
                 this.createProvider(),
@@ -92,8 +134,10 @@ export class AgentRuntimeFactory {
             ),
             agentKey,
             modelId,
-            toolNames: tools.map((tool) => tool.name),
-        }
+            toolNames,
+            snapshot,
+            fingerprint: createFingerprint(snapshot),
+        })
     }
 }
 
