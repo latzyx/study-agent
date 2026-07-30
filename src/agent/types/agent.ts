@@ -1,4 +1,5 @@
-import type {Tool} from '../../tools/domain/tool'
+import type {LLMMessage} from '../../llm/domain/llm-provider'
+import type {Tool, ToolContext} from '../../tools/domain/tool'
 
 export type ModelProfile = 'fast' | 'general' | 'reasoning' | 'vision'
 
@@ -10,6 +11,12 @@ export interface AgentConfig {
     modelId?: string
     maxSteps?: number
     tools?: Tool[]
+}
+
+export interface AgentRunOptions {
+    history?: LLMMessage[]
+    toolContext?: ToolContext
+    abortSignal?: AbortSignal
 }
 
 export interface AgentEvent {
@@ -36,7 +43,7 @@ export interface AgentEvent {
 export interface Agent {
     config: AgentConfig
 
-    run(input: string): AsyncGenerator<AgentEvent>
+    run(input: string, options?: AgentRunOptions): AsyncGenerator<AgentEvent>
 
     getTools(): Tool[]
 }
