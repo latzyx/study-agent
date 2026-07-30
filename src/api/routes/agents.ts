@@ -1,49 +1,19 @@
 import {Elysia, t} from 'elysia'
-import {and, desc, eq, sql} from 'drizzle-orm'
-import {db} from '../../db/index.js'
-import {agents} from '../../db/schema.js'
+import {
+    createUserAgent,
+    deleteUserAgent,
+    findUserAgent,
+    listUserAgents,
+    serializeAgent,
+    updateUserAgent,
+} from '../../services/agent-service.js'
 import {recordAuditLog} from '../../services/audit-log-service.js'
-import {findUnknownBuiltinTools} from '../../tools/builtin/index.js'
-import {createApiError} from '../errors/api-error.js'
 import {
     authenticateAccessToken,
     authPlugin,
     unauthorizedResponse,
 } from '../middleware/auth.js'
 import {agentListQuery, createAgentBody, updateAgentBody} from '../schemas/agent.js'
-
-function notFoundResponse(): Response {
-    return Response.json(
-        {success: false, error: {code: 'NOT_FOUND', message: 'Agent not found'}},
-        {status: 404},
-    )
-}
-
-function serializeAgent(agent: typeof agents.$inferSelect) {
-    return {
-        ...agent,
-        description: agent.description ?? undefined,
-        systemPrompt: agent.systemPrompt ?? undefined,
-        createdAt: agent.createdAt.toISOString(),
-        updatedAt: agent.updatedAt.toISOString(),
-    }
-}
-
-function normalizeTools(toolNames: readonly string[] | undefined): string[] {
-    const normalized = [...new Set(toolNames ?? [])]
-    const unknown = findUnknownBuiltinTools(normalized)
-
-    if (unknown.length > 0) {
-        throw createApiError(
-            400,
-            'UNKNOWN_AGENT_TOOLS',
-            `Unknown tools: ${unknown.join(', ')}`,
-            {unknownTools: unknown},
-        )
-    }
-
-    return normalized
-}
 
 export const agentRoutes = new Elysia({prefix: '/agents'})
     .use(authPlugin)
@@ -55,23 +25,12 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
 
             const page = query.page ?? 1
             const pageSize = query.pageSize ?? 20
-            const offset = (page - 1) * pageSize
-            const ownedByUser = eq(agents.createdBy, user.sub)
-
-            const [countResult] = await db.select({count: sql<number>`count(*)::int`})
-                .from(agents)
-                .where(ownedByUser)
-            const items = await db.select()
-                .from(agents)
-                .where(ownedByUser)
-                .orderBy(desc(agents.createdAt))
-                .limit(pageSize)
-                .offset(offset)
+            const result = await listUserAgents({userId: user.sub, page, pageSize})
 
             return {
                 success: true,
-                data: items.map(serializeAgent),
-                pagination: {page, pageSize, total: countResult?.count ?? 0},
+                data: result.items.map(serializeAgent),
+                pagination: {page, pageSize, total: result.total},
             }
         },
         {
@@ -85,35 +44,30 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
-            const tools = normalizeTools(body.tools)
-            const [newAgent] = await db.insert(agents).values({
-                name: body.name.trim(),
+            const agent = await createUserAgent({
+                userId: user.sub,
+                name: body.name,
                 description: body.description,
                 systemPrompt: body.systemPrompt,
-                modelProfile: body.modelProfile ?? 'general',
-                maxSteps: body.maxSteps ?? 5,
-                tools,
-                createdBy: user.sub,
-            }).returning()
-
-            if (!newAgent) {
-                throw createApiError(500, 'CREATE_FAILED', 'Failed to create agent')
-            }
+                modelProfile: body.modelProfile,
+                maxSteps: body.maxSteps,
+                tools: body.tools,
+            })
 
             await recordAuditLog({
                 userId: user.sub,
                 action: 'agent.create',
                 resourceType: 'agent',
-                resourceId: newAgent.id,
+                resourceId: agent.id,
                 details: {
-                    name: newAgent.name,
-                    modelProfile: newAgent.modelProfile,
-                    tools: newAgent.tools,
+                    name: agent.name,
+                    modelProfile: agent.modelProfile,
+                    tools: agent.tools,
                 },
                 request,
             })
 
-            return {success: true, data: serializeAgent(newAgent)}
+            return {success: true, data: serializeAgent(agent)}
         },
         {
             body: createAgentBody,
@@ -126,12 +80,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
-            const [agent] = await db.select().from(agents).where(and(
-                eq(agents.id, params.id),
-                eq(agents.createdBy, user.sub),
-            )).limit(1)
-
-            if (!agent) return notFoundResponse()
+            const agent = await findUserAgent(user.sub, params.id)
             return {success: true, data: serializeAgent(agent)}
         },
         {
@@ -145,55 +94,27 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
-            const updateData: Partial<typeof agents.$inferInsert> = {updatedAt: new Date()}
-            const changedFields: string[] = []
-
-            if (body.name !== undefined) {
-                updateData.name = body.name.trim()
-                changedFields.push('name')
-            }
-            if (body.description !== undefined) {
-                updateData.description = body.description
-                changedFields.push('description')
-            }
-            if (body.systemPrompt !== undefined) {
-                updateData.systemPrompt = body.systemPrompt
-                changedFields.push('systemPrompt')
-            }
-            if (body.modelProfile !== undefined) {
-                updateData.modelProfile = body.modelProfile
-                changedFields.push('modelProfile')
-            }
-            if (body.maxSteps !== undefined) {
-                updateData.maxSteps = body.maxSteps
-                changedFields.push('maxSteps')
-            }
-            if (body.tools !== undefined) {
-                updateData.tools = normalizeTools(body.tools)
-                changedFields.push('tools')
-            }
-
-            if (changedFields.length === 0) {
-                throw createApiError(400, 'NO_CHANGES', 'At least one field must be provided')
-            }
-
-            const [updated] = await db.update(agents)
-                .set(updateData)
-                .where(and(eq(agents.id, params.id), eq(agents.createdBy, user.sub)))
-                .returning()
-
-            if (!updated) return notFoundResponse()
+            const result = await updateUserAgent({
+                userId: user.sub,
+                agentId: params.id,
+                name: body.name,
+                description: body.description,
+                systemPrompt: body.systemPrompt,
+                modelProfile: body.modelProfile,
+                maxSteps: body.maxSteps,
+                tools: body.tools,
+            })
 
             await recordAuditLog({
                 userId: user.sub,
                 action: 'agent.update',
                 resourceType: 'agent',
-                resourceId: updated.id,
-                details: {changedFields},
+                resourceId: result.agent.id,
+                details: {changedFields: result.changedFields},
                 request,
             })
 
-            return {success: true, data: serializeAgent(updated)}
+            return {success: true, data: serializeAgent(result.agent)}
         },
         {
             params: t.Object({id: t.String({format: 'uuid'})}),
@@ -207,12 +128,7 @@ export const agentRoutes = new Elysia({prefix: '/agents'})
             const user = await authenticateAccessToken(JWT, headers.authorization)
             if (!user) return unauthorizedResponse()
 
-            const [deleted] = await db.delete(agents)
-                .where(and(eq(agents.id, params.id), eq(agents.createdBy, user.sub)))
-                .returning({id: agents.id, name: agents.name})
-
-            if (!deleted) return notFoundResponse()
-
+            const deleted = await deleteUserAgent(user.sub, params.id)
             await recordAuditLog({
                 userId: user.sub,
                 action: 'agent.delete',
