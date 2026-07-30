@@ -1,42 +1,15 @@
-export type ModelProfile =
-    | "fast"
-    | "general"
-    | "reasoning"
-    | "vision"
-    | "fallback";
+import {env} from '../../config/env.js'
 
-const modelProfiles: Record<ModelProfile, string> = {
-    fast:
-        process.env.LLM_MODEL_FAST ??
-        "lmstudio:qwen-local",
+export type ModelProfile = 'fast' | 'general' | 'reasoning' | 'vision' | 'fallback'
 
-    general:
-        process.env.LLM_MODEL_GENERAL ??
-        "lmstudio:qwen-local",
+const modelProfiles: Readonly<Record<ModelProfile, string>> = env.models
 
-    reasoning:
-        process.env.LLM_MODEL_REASONING ??
-        "openai:reasoning-model",
+export function resolveModel(profile: ModelProfile): string {
+    const model = modelProfiles[profile]
+    if (!model) throw new Error(`Model profile not configured: ${profile}`)
+    return model
+}
 
-    vision:
-        process.env.LLM_MODEL_VISION ??
-        "openai:vision-model",
-
-    fallback:
-        process.env.LLM_MODEL_FALLBACK ??
-        "anthropic:general-model",
-};
-
-export function resolveModel(
-    profile: ModelProfile,
-): string {
-    const model = modelProfiles[profile];
-
-    if (!model) {
-        throw new Error(
-            `Model profile not configured: ${profile}`,
-        );
-    }
-
-    return model;
+export function listModelProfiles(): Readonly<Record<ModelProfile, string>> {
+    return modelProfiles
 }
