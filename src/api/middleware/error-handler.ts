@@ -1,6 +1,6 @@
 import {Elysia} from 'elysia'
 import {env} from '../../config/env.js'
-import {ApiError, errorPayload} from '../errors/api-error.js'
+import {ApiError, errorPayload, type ApiErrorHeaders} from '../errors/api-error.js'
 import {requestContextPlugin} from './request-context.js'
 
 function jsonError(
@@ -9,10 +9,17 @@ function jsonError(
     message: string,
     requestId: string,
     details?: Record<string, unknown>,
+    headers?: ApiErrorHeaders,
 ): Response {
     return Response.json(
         errorPayload(code, message, details, requestId),
-        {status, headers: {'x-request-id': requestId}},
+        {
+            status,
+            headers: {
+                ...headers,
+                'x-request-id': requestId,
+            },
+        },
     )
 }
 
@@ -34,6 +41,7 @@ export const errorHandlerPlugin = new Elysia({name: 'error-handler'})
                 error.message,
                 resolvedRequestId,
                 error.details,
+                error.headers,
             )
         }
 
