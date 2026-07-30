@@ -1,6 +1,7 @@
 import {env} from '../config/env.js'
 import {closeDatabaseConnection} from '../db/index.js'
 import {startAiTraceMaintenance} from '../services/ai-trace-maintenance-service.js'
+import {backgroundTaskStats, drainBackgroundTasks} from '../services/background-task-service.js'
 import {createApp} from './create-app.js'
 
 const app = createApp().listen({
@@ -20,6 +21,15 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
         console.log('[shutdown] Stopping HTTP server')
         await app.stop()
+
+        const stats = backgroundTaskStats()
+        if (stats.pending > 0) {
+            console.log('[shutdown] Draining background tasks', stats)
+        }
+        const drain = await drainBackgroundTasks()
+        if (!drain.completed) {
+            console.error('[shutdown] Some background tasks were not persisted', drain)
+        }
 
         console.log('[shutdown] Closing database connections')
         await closeDatabaseConnection()
