@@ -1,4 +1,4 @@
-import type { Tool } from "../../tools/domain/tool";
+import type {Tool} from "../../tools/domain/tool";
 
 export type ModelProfile = 'fast' | 'general' | 'reasoning' | 'vision';
 
@@ -34,6 +34,8 @@ export interface AgentEvent {
 
 export interface Agent {
     config: AgentConfig;
+
     run(input: string): AsyncGenerator<AgentEvent>;
+
     getTools(): Tool[];
 }

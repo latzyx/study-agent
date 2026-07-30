@@ -1,10 +1,10 @@
-import { BaseAgent } from "../base-agent";
-import type { Tool } from "../../tools/domain/tool";
-import { calculatorTool } from "../../tools/builtin/calculator.tool";
-import { currentTimeTool } from "../../tools/builtin/current-time.tool";
-import type { LLMProvider } from "../../llm/domain/llm-provider";
-import type { ToolRegistry } from "../../tools/registry/tool-registry";
-import type { AgentConfig } from "../types/agent";
+import {BaseAgent} from "../base-agent";
+import type {Tool} from "../../tools/domain/tool";
+import {calculatorTool} from "../../tools/builtin/calculator.tool";
+import {currentTimeTool} from "../../tools/builtin/current-time.tool";
+import type {LLMProvider} from "../../llm/domain/llm-provider";
+import type {ToolRegistry} from "../../tools/registry/tool-registry";
+import type {AgentConfig} from "../types/agent";
 
 export const generalAssistantConfig: AgentConfig = {
     name: "general-assistant",
@@ -28,7 +28,7 @@ export class GeneralAssistant extends BaseAgent {
     ) {
         super(generalAssistantConfig, llmProvider, toolRegistry);
     }
-    
+
     getTools(): Tool[] {
         return [calculatorTool, currentTimeTool];
     }

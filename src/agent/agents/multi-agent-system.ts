@@ -12,7 +12,7 @@ export interface MultiAgentConfig {
 
 export class MultiAgentSystem implements Agent {
     config: AgentConfig;
-    private agents: Agent[];
+    private readonly agents: Agent[];
     private orchestratorPrompt: string;
     private llmProvider: LLMProvider;
     private toolRegistry: ToolRegistry;

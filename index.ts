@@ -12,12 +12,11 @@ import { MultiAgentSystem } from "./src/agent/agents/multi-agent-system";
 import { AgentRouter } from "./src/agent/router/agent-router";
 import { ToolRegistry } from "./src/tools/registry/tool-registry";
 import { AISDKProviderAdapter } from "./src/llm/providers/ai-sdk-provider";
+import { MockProvider } from "./src/llm/providers/mock-provider";
 
 async function main(): Promise<void> {
-    // 创建LLM提供者
-    const modelId = resolveModel("fast");
-    const model = providerRegistry.languageModel(modelId as any);
-    const llmProvider = new AISDKProviderAdapter(model);
+    // 创建LLM提供者 (使用mock provider进行测试)
+    const llmProvider = new MockProvider("你好，我是通用助手。我可以帮你处理各种任务。");
     
     // 创建工具注册表
     const toolRegistry = new ToolRegistry();
