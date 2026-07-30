@@ -4,8 +4,11 @@ const REQUIRED_TABLES = [
     'users',
     'refresh_tokens',
     'agents',
+    'agent_versions',
     'conversations',
     'messages',
+    'ai_runs',
+    'ai_spans',
     'audit_logs',
     'operation_logs',
     'files',
@@ -14,7 +17,21 @@ const REQUIRED_TABLES = [
 
 const REQUIRED_NOT_NULL_COLUMNS = [
     'agents.tools',
+    'agents.version',
     'agents.created_by',
+    'agent_versions.agent_id',
+    'agent_versions.version',
+    'agent_versions.snapshot',
+    'ai_runs.trace_id',
+    'ai_runs.function_id',
+    'ai_runs.status',
+    'ai_runs.step_count',
+    'ai_runs.tool_call_count',
+    'ai_spans.run_id',
+    'ai_spans.span_key',
+    'ai_spans.kind',
+    'ai_spans.name',
+    'ai_spans.status',
     'conversations.agent_id',
     'files.user_id',
     'files.size',
@@ -25,6 +42,23 @@ const REQUIRED_NOT_NULL_COLUMNS = [
 
 const REQUIRED_CONSTRAINTS = [
     'agents_created_by_users_id_fk',
+    'agents_version_check',
+    'agent_versions_agent_id_agents_id_fk',
+    'agent_versions_changed_by_users_id_fk',
+    'agent_versions_version_check',
+    'agent_versions_change_type_check',
+    'ai_runs_trace_id_unique',
+    'ai_runs_user_id_users_id_fk',
+    'ai_runs_agent_id_agents_id_fk',
+    'ai_runs_conversation_id_conversations_id_fk',
+    'ai_runs_status_check',
+    'ai_runs_duration_check',
+    'ai_runs_step_count_check',
+    'ai_runs_tool_call_count_check',
+    'ai_spans_run_id_ai_runs_id_fk',
+    'ai_spans_kind_check',
+    'ai_spans_status_check',
+    'ai_spans_duration_check',
     'conversations_agent_id_agents_id_fk',
     'files_user_id_users_id_fk',
     'refresh_tokens_user_id_users_id_fk',
@@ -41,6 +75,17 @@ const REQUIRED_INDEXES = [
     'refresh_tokens_user_expires_at_idx',
     'refresh_tokens_active_idx',
     'agents_created_by_created_at_idx',
+    'agent_versions_agent_version_uidx',
+    'agent_versions_agent_created_at_idx',
+    'ai_runs_user_created_at_idx',
+    'ai_runs_agent_created_at_idx',
+    'ai_runs_conversation_created_at_idx',
+    'ai_runs_request_id_idx',
+    'ai_runs_status_created_at_idx',
+    'ai_spans_run_span_key_uidx',
+    'ai_spans_run_started_at_idx',
+    'ai_spans_kind_status_idx',
+    'ai_spans_tool_call_id_idx',
     'conversations_user_session_uidx',
     'conversations_user_agent_created_at_idx',
     'messages_conversation_created_at_idx',
@@ -108,7 +153,9 @@ async function verify(): Promise<void> {
     const [migrationCount] = await sql<{count: number}[]>`
         select count(*)::int as count from study_agent_schema_migrations
     `
-    if ((migrationCount?.count ?? 0) < 1) throw new Error('No applied migration records found')
+    if ((migrationCount?.count ?? 0) < 2) {
+        throw new Error('Expected at least two applied migration records')
+    }
 
     console.log('[db:verify] migrated schema verified')
 }
