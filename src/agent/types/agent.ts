@@ -1,4 +1,8 @@
-import type {LLMMessage} from '../../llm/domain/llm-provider'
+import type {
+    LLMMessage,
+    LLMTelemetrySettings,
+    LLMToolCall,
+} from '../../llm/domain/llm-provider'
 import type {Tool, ToolContext} from '../../tools/domain/tool'
 
 export type ModelProfile = 'fast' | 'general' | 'reasoning' | 'vision'
@@ -13,10 +17,23 @@ export interface AgentConfig {
     tools?: Tool[]
 }
 
+export interface AgentTraceRecorder {
+    telemetryForStep(stepNumber: number, model: string): LLMTelemetrySettings | undefined
+    toolStarted(stepNumber: number, toolCall: LLMToolCall): void
+    toolFinished(
+        stepNumber: number,
+        toolCall: LLMToolCall,
+        outcome: {success: true; result: unknown} | {success: false; error: Error},
+        durationMs: number,
+    ): void
+    flush(): Promise<void>
+}
+
 export interface AgentRunOptions {
     history?: LLMMessage[]
     toolContext?: ToolContext
     abortSignal?: AbortSignal
+    trace?: AgentTraceRecorder
 }
 
 export interface AgentEvent {
