@@ -1,8 +1,9 @@
-import {createProviderRegistry} from 'ai'
+import {createProviderRegistry, type LanguageModel} from 'ai'
 import {createOpenAI} from '@ai-sdk/openai'
 import {createAnthropic} from '@ai-sdk/anthropic'
 import {createOpenAICompatible} from '@ai-sdk/openai-compatible'
 import {env} from '../../config/env.js'
+import {LLMProviderError} from '../domain/llm-provider.js'
 
 const openai = createOpenAI({
     apiKey: env.providers.openaiApiKey,
@@ -30,3 +31,31 @@ export const providerRegistry = createProviderRegistry({
     lmstudio,
     vllm,
 })
+
+export function resolveLanguageModel(modelId: string): LanguageModel {
+    const normalizedModelId = modelId.trim()
+    if (!normalizedModelId) {
+        throw new LLMProviderError('LLM model id cannot be empty', 'INVALID_REQUEST', false)
+    }
+    if (!normalizedModelId.includes(':')) {
+        throw new LLMProviderError(
+            `LLM model id must include a provider prefix: ${normalizedModelId}`,
+            'INVALID_REQUEST',
+            false,
+        )
+    }
+
+    try {
+        return providerRegistry.languageModel(
+            normalizedModelId as Parameters<typeof providerRegistry.languageModel>[0],
+        )
+    } catch (error) {
+        if (error instanceof LLMProviderError) throw error
+        throw new LLMProviderError(
+            `Unknown or unavailable LLM model: ${normalizedModelId}`,
+            'INVALID_REQUEST',
+            false,
+            {cause: error},
+        )
+    }
+}

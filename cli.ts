@@ -1,32 +1,27 @@
 import {createInterface} from 'node:readline/promises'
 import {stdin as input, stdout as output} from 'node:process'
-import {GeneralAssistant} from './src/agent/agents/general-assistant.js'
-import {AISDKProviderAdapter} from './src/llm/providers/ai-sdk-provider.js'
-import {providerRegistry} from './src/llm/registry/provider-registry.js'
-import {resolveModel} from './src/llm/registry/model-registry.js'
-import {ToolRegistry} from './src/tools/registry/tool-registry.js'
+import {createBuiltinAgentRuntime} from './src/agent/runtime/builtin-agent-runtime.js'
+import {defaultIntentRouter} from './src/intent/index.js'
 
-function createCliAgent(): GeneralAssistant {
-    const modelId = resolveModel('general')
-    const model = providerRegistry.languageModel(modelId as any)
-    const agent = new GeneralAssistant(
-        new AISDKProviderAdapter(model),
-        new ToolRegistry(),
-    )
+async function runPrompt(prompt: string): Promise<void> {
+    const decision = await defaultIntentRouter.route(prompt)
+    if (decision.requiresClarification) {
+        const candidates = decision.candidates
+            .slice(0, 2)
+            .map((candidate) => candidate.agentKey)
+            .join(' / ')
+        throw new Error(`意图不明确，请补充问题范围。候选 Agent：${candidates}`)
+    }
 
-    agent.config = {...agent.config, modelId}
-    return agent
-}
-
-async function runPrompt(agent: GeneralAssistant, prompt: string): Promise<void> {
+    const runtime = createBuiltinAgentRuntime(decision.selectedAgentKey)
     let wroteText = false
 
-    for await (const event of agent.run(prompt)) {
+    for await (const event of runtime.agent.run(prompt)) {
         if (event.type === 'text-delta') {
             output.write(event.text ?? '')
             wroteText = true
         } else if (event.type === 'tool-call' && event.toolCall) {
-            output.write(`\n[tool] ${event.toolCall.name} ${JSON.stringify(event.toolCall.input)}\n`)
+            output.write(`\n[tool:${runtime.agentKey}] ${event.toolCall.name} ${JSON.stringify(event.toolCall.input)}\n`)
         } else if (event.type === 'tool-result' && event.toolResult) {
             output.write(`[result] ${JSON.stringify(event.toolResult.result)}\n`)
         } else if (event.type === 'error') {
@@ -38,11 +33,10 @@ async function runPrompt(agent: GeneralAssistant, prompt: string): Promise<void>
 }
 
 async function main(): Promise<void> {
-    const agent = createCliAgent()
     const inlinePrompt = process.argv.slice(2).join(' ').trim()
 
     if (inlinePrompt) {
-        await runPrompt(agent, inlinePrompt)
+        await runPrompt(inlinePrompt)
         return
     }
 
@@ -56,7 +50,7 @@ async function main(): Promise<void> {
             if (prompt === '/exit' || prompt === '/quit') break
 
             try {
-                await runPrompt(agent, prompt)
+                await runPrompt(prompt)
             } catch (error) {
                 console.error('[cli]', error instanceof Error ? error.message : error)
             }

@@ -1,31 +1,25 @@
 # Study Agent
 
-基于 **Bun + TypeScript + AI SDK + Elysia + Drizzle ORM + PostgreSQL** 的多 Agent 学习与实践项目。
-
-当前项目已经从简单示例扩展为具备认证、会话、工具执行、审计、文件管理、运行时保护和工程化部署能力的 Agent API。
+基于 **Bun + TypeScript + AI SDK + Elysia + Drizzle ORM + PostgreSQL** 的多 Agent 工程实践项目。
 
 ## 核心能力
 
-- OpenAI、Anthropic、LM Studio、vLLM Provider Registry
-- 按 `fast/general/reasoning/vision` 配置模型档位
-- Agent 配置、工具白名单和多步工具执行
+- OpenAI、Anthropic、Google、LM Studio、vLLM Provider Registry
+- `fast/general/reasoning/vision` 模型档位与请求级真实模型解析
+- Agent 配置、Tool 白名单、多步 Tool 调用和运行时隔离
+- 可组合意图分类器、候选排序、置信度和歧义检测
 - JSON 与 SSE 流式聊天
-- 最近 50 条会话消息上下文
-- Bearer-only JWT 认证
-- 服务端 Refresh Token 哈希存储、轮换、复用检测和注销
-- 注册、登录、Token 和 Chat 请求限流
-- 用户级与 session 级 Chat 并发控制
-- Agent、会话、消息、文件、审计与请求日志持久化
-- 请求 ID、统一异常响应和生产环境错误脱敏
-- PostgreSQL 就绪检查、版本化迁移和优雅关闭
-- Swagger API 文档
-- Bun 单元测试、类型检查、构建和 PostgreSQL 迁移 CI
+- 标准 assistant tool-call / tool-result 历史链
+- Bearer JWT、Refresh Token 轮换、复用检测和注销
+- 用户与 session 级并发控制、限流、审计和请求日志
+- PostgreSQL 版本化迁移、健康检查和优雅关闭
+- Bun 单元测试、类型检查、构建和 PostgreSQL CI
 
 ## 环境要求
 
 - Bun 1.3+
 - PostgreSQL 14+
-- 至少一个可用的模型 Provider
+- 至少一个可用模型 Provider
 
 ## 初始化
 
@@ -34,7 +28,7 @@ bun install
 cp .env.example .env
 ```
 
-至少修改：
+至少配置：
 
 ```dotenv
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/study_agent
@@ -42,11 +36,11 @@ JWT_SECRET=replace-with-a-long-random-secret-at-least-32-characters
 LLM_MODEL_GENERAL=lmstudio:qwen-local
 ```
 
-生产环境的 `JWT_SECRET` 必须不少于 32 个字符，否则应用会拒绝启动。
+生产环境的 `JWT_SECRET` 少于 32 个字符时应用会拒绝启动。
 
-### 新数据库
+## 数据库
 
-推荐直接执行版本化迁移：
+新数据库：
 
 ```bash
 bun run db:check
@@ -54,65 +48,31 @@ bun run db:migrate
 bun run db:verify
 ```
 
-开发阶段需要快速同步 Schema 时也可以使用：
+开发环境可使用：
 
 ```bash
 bun run db:push
 ```
 
-`db:push` 只适合本地开发，不应替代生产迁移。
-
-### 已有数据库
-
-不要直接对测试库或生产库执行 `db:push`。先阅读：
+`db:push` 不应替代生产迁移。已有数据库升级前请阅读：
 
 ```text
 docs/database-migration-v2.md
 ```
 
-执行历史数据预检和备份后，再运行：
+迁移规则：
 
-```bash
-bun run db:check
-bun run db:migrate
-bun run db:verify
-```
-
-迁移系统会：
-
-- 按文件名前四位版本号顺序执行 SQL。
-- 使用 PostgreSQL advisory lock 防止多个实例同时迁移。
-- 在 `study_agent_schema_migrations` 中记录文件名和 SHA-256 checksum。
-- 已应用迁移内容被修改时拒绝继续执行。
-- 整批迁移失败时回滚事务。
-
-创建下一份迁移：
-
-```bash
-bun run db:generate -- add-agent-status
-# 编辑生成的 src/db/migrations/0002_add-agent-status.sql
-bun run db:check
-```
-
-迁移只允许向前追加。不要修改已经部署过的 SQL 文件。
+- 按四位版本号顺序执行。
+- 使用 PostgreSQL advisory lock 防止并发迁移。
+- 保存文件名和 SHA-256 checksum。
+- 已执行迁移被修改时拒绝继续。
+- 迁移失败时回滚当前事务。
 
 ## 运行
 
-开发模式：
-
 ```bash
 bun run dev
-```
-
-普通启动：
-
-```bash
 bun run start
-```
-
-构建并运行产物：
-
-```bash
 bun run build
 bun run start:prod
 ```
@@ -126,34 +86,164 @@ bun run start:prod
 
 ## CLI
 
-单次提问：
-
 ```bash
 bun run cli -- "123 * 456 等于多少"
-```
-
-交互模式：
-
-```bash
 bun run cli
 ```
 
-输入 `/exit` 或 `/quit` 退出。CLI 只使用模型和工具，不要求配置数据库。
+CLI 不再使用同时挂载所有 Tool 的旧通用 Agent。每次输入执行：
+
+```text
+用户输入
+→ IntentRouter
+→ general / math / time
+→ createBuiltinAgentRuntime
+→ AgentRuntimeFactory
+→ 仅加载该 Agent 拥有的 Tool
+```
+
+意图歧义时 CLI 会要求补充问题，不会偷偷选择默认专业 Agent。交互模式输入 `/exit` 或 `/quit` 退出，且不依赖数据库。
+
+## Agent Runtime Factory
+
+Chat 不直接创建 Provider、解析模型或注册 Tool，而是通过：
+
+```text
+src/agent/runtime/agent-runtime-factory.ts
+```
+
+从一次 Agent 配置快照生成不可变 Runtime 描述：
+
+```text
+Agent 配置快照
+→ 归一化和校验
+→ 推导 Agent owner
+→ 解析 owner 范围内的 Tool
+→ 解析 provider:model
+→ 创建独立 Provider 和 ToolRegistry
+→ 返回 AgentRuntimeDescriptor
+```
+
+Factory 的模型解析、Tool 解析、Provider 和 Registry 创建函数均可注入。后续接入以下能力时不需要修改 Chat 主流程：
+
+- Agent 配置版本快照
+- 租户级 Provider
+- 远程模型网关
+- 沙箱 ToolRegistry
+- MCP Tool Adapter
+- 测试 Runtime
+- 分布式 Agent Runtime
+
+`createBuiltinAgentRuntime(agentKey)` 则把内置 Agent Catalog 转换成同一 Runtime 描述，供 CLI、后台任务和未来自动路由复用。
+
+## Agent 与 Tool 目录
+
+专业 Tool 必须放在所属 Agent 目录：
+
+```text
+src/agents/
+├── general/
+│   └── index.ts
+├── math/
+│   ├── index.ts
+│   └── tools/
+│       └── calculator.tool.ts
+├── time/
+│   ├── index.ts
+│   └── tools/
+│       └── current-time.tool.ts
+├── catalog.ts
+└── domain/
+    └── agent-definition.ts
+```
+
+约束：
+
+- 一个 Tool 只能有一个 owner。
+- 一个数据库 Agent 的 Tool 必须全部属于同一个内置 Agent。
+- 混合 `calculator` 与 `current_time` 会返回 `MIXED_AGENT_TOOLS`。
+- `catalog.ts` 是 Agent 定义和 Tool owner 的唯一聚合入口。
+- `resolveAgentTools()` 会拒绝加载其他 Agent 的 Tool。
+- `src/tools/builtin` 只保留兼容导出，不保存真实实现。
+
+当前 Tool：
+
+- `calculator`：归属 `math` Agent。
+- `current_time`：归属 `time` Agent。
+
+## 意图识别
+
+```text
+src/intent/
+├── classifiers/
+│   └── keyword-intent-classifier.ts
+├── domain/
+│   └── intent.ts
+├── intent-router.ts
+└── index.ts
+```
+
+`IntentRouter` 支持：
+
+- 多分类器并行执行
+- 分类器权重
+- 候选 Agent 排序
+- 最低置信度阈值
+- 第一、第二候选歧义判断
+- 无匹配回退 `general`
+- 显式 Agent 参数优先
+- 非法权重、未知 Agent 和非有限分数显式失败
+
+接入 MacBERT、Embedding Router 或 LLM 分类器时，只需实现 `IntentClassifier`。
+
+当前 Chat API 仍使用数据库 `agentId` 作为执行目标。自动分发前必须建立明确的 `agentKey → agentId` 绑定，禁止找不到映射时偷偷使用默认 Agent。
+
+## 会话和执行完整性
+
+- Agent、会话和消息按用户隔离。
+- 同一用户的 `sessionId` 全局唯一。
+- 已绑定 Agent 的 session 不能切换 Agent。
+- 同一 session 的模型执行默认串行化。
+- 执行成功后，user、assistant 和 tool 消息在同一事务写入。
+- 模型失败、Tool 失败或请求中止时，不写入不完整对话回合。
+- Tool 历史按标准 assistant tool-call 和 tool-result 消息恢复。
+- 历史查询会向前扩展并从完整 user 回合边界开始，避免从孤立 tool 消息开始。
+- 无匹配 Tool call 的 result、重复 result 和未完成 Tool call 会被拒绝。
+- Provider 流必须显式发出 `finish`；流被截断时不会伪造成功。
+- 空 assistant 输出不会写入数据库。
+
+## Agent 错误分类
+
+Agent Runtime 不再把所有异常统一返回 502：
+
+- 请求中止：`499 REQUEST_ABORTED`
+- Provider 超时：`504 LLM_TIMEOUT`
+- Provider 限流：`429 LLM_RATE_LIMITED`
+- Provider 不可用：`503 LLM_PROVIDER_UNAVAILABLE`
+- Provider 认证失败：`502 LLM_PROVIDER_AUTHENTICATION_FAILED`
+- Runtime 请求配置非法：`500 INVALID_LLM_RUNTIME_REQUEST`
+- 超过 Agent 步骤限制：`422 AGENT_MAX_STEPS_EXCEEDED`
+
+生产环境仍会隐藏 Provider 和内部实现细节。
+
+## 后续升级边界
+
+当前架构已经为以下演进预留接口，但尚未偷偷启用：
+
+- `agentKey → agentId` 显式绑定与自动路由
+- MacBERT + Embedding + LLM 级联意图识别
+- Agent 配置不可变版本快照
+- Redis 分布式 session 租约和限流
+- Tool 幂等键、副作用声明和补偿动作
+- Tool 沙箱、权限策略和租户级凭据
+- Trace、指标、成本和 Token 预算治理
+- 多 Agent 编排中的循环检测和总执行预算
+
+这些能力应通过 Runtime Factory、IntentClassifier、Tool Registry Adapter 和独立策略层接入，不应重新把实现堆回 Chat Service。
 
 ## 认证
 
-项目只接受 Bearer Token，不读取或写入认证 Cookie。
-
-注册或登录后取得：
-
-```json
-{
-  "token": "access-token",
-  "refreshToken": "refresh-token"
-}
-```
-
-调用业务接口：
+接口只接受：
 
 ```http
 Authorization: Bearer <access-token>
@@ -164,8 +254,6 @@ Authorization: Bearer <access-token>
 - Access Token：15 分钟
 - Refresh Token：7 天
 
-可通过以下环境变量修改：
-
 ```dotenv
 JWT_ISSUER=study-agent
 JWT_AUDIENCE=study-agent-api
@@ -173,91 +261,50 @@ ACCESS_TOKEN_TTL_SECONDS=900
 REFRESH_TOKEN_TTL_SECONDS=604800
 ```
 
-### 刷新 Token
+刷新和注销：
 
-```http
+```text
 POST /api/v1/auth/refresh
-Content-Type: application/json
-
-{
-  "token": "<refresh-token>"
-}
-```
-
-刷新成功后，旧 Refresh Token 会立即撤销。重复提交旧 Token 会返回 401。
-
-### 注销
-
-```http
 POST /api/v1/auth/logout
-Content-Type: application/json
-
-{
-  "token": "<refresh-token>"
-}
 ```
 
-服务端只保存 Refresh Token 的 SHA-256 哈希，不保存明文 Token。认证响应带有 `Cache-Control: no-store`。
+服务端只保存 Refresh Token 的 SHA-256 哈希。刷新成功后旧 Token 立即撤销。
 
 ## 限流与并发
 
-注册、登录、Refresh Token 和 Chat 分别使用独立限流策略。Chat 同时按用户和 session 控制并发，默认同一个 session 只允许一个模型执行。
+注册、登录、Refresh Token 和 Chat 使用独立限流策略。Chat 同时按用户和 session 控制并发。
 
-相关配置和多实例注意事项见：
+当前并发租约为进程内实现，水平扩容前应替换为 Redis 等共享后端。详见：
 
 ```text
 docs/runtime-guardrails.md
 ```
 
-当前限流和并发租约是进程内实现。水平扩容前应替换为 Redis 等共享后端。
+## 管理与审计
 
-## Agent 工具
-
-Agent 创建或更新时，`tools` 只能引用已注册的内置工具。未知工具会返回 `UNKNOWN_AGENT_TOOLS`，不会静默忽略。
-
-当前工具：
-
-- `calculator`：有限数字的加、减、乘、除
-- `current_time`：指定 IANA 时区的当前时间，默认 UTC
-
-## 会话规则
-
-- Agent、会话和消息按当前用户隔离。
-- 同一用户的 `sessionId` 全局唯一。
-- 已绑定 Agent 的 session 不能切换到另一个 Agent。
-- 并发创建同一 session 时通过数据库唯一约束收敛。
-- 工具调用和结果会保存，并进入后续对话上下文。
-- 同一 session 的模型执行默认串行化。
-
-## 管理员权限
-
-通过环境变量配置管理员：
+管理员通过环境变量配置：
 
 ```dotenv
 ADMIN_USER_IDS=uuid-1,uuid-2
 ADMIN_USERNAMES=admin,lazy
 ```
 
-只有对应用户可以访问：
+管理接口：
 
 ```text
 GET /api/v1/admin/audit-logs
 GET /api/v1/admin/operation-logs
 ```
 
-操作日志支持用户、方法、路径、状态码、requestId 和时间范围筛选。
+## 请求追踪和错误结构
 
-## 请求追踪与错误结构
-
-客户端可以传入：
+客户端可传入：
 
 ```http
 X-Request-Id: frontend-request-123
 ```
 
-服务端会在响应头返回 `X-Request-Id`。没有提供合法值时会自动生成 UUID。
-
-错误响应统一为：
+错误响应：
 
 ```json
 {
@@ -270,24 +317,23 @@ X-Request-Id: frontend-request-123
 }
 ```
 
-生产环境不会向客户端暴露模型 Provider、数据库或内部堆栈信息。
+生产环境不会暴露 Provider、数据库和内部堆栈信息。
 
 ## 常用命令
 
 ```bash
-bun run typecheck          # TypeScript 类型检查
-bun test                   # 单元测试
-bun run check              # 类型检查 + 单元测试
-bun run build              # 构建 Bun 生产产物
-bun run db:generate -- 名称 # 创建下一份连续编号 SQL 迁移
-bun run db:check           # 校验迁移文件命名、版本和 checksum
-bun run db:migrate         # advisory lock 下应用未执行迁移
-bun run db:verify          # 验证表、列、约束和索引
-bun run db:push            # 仅开发环境直接同步 Schema
-bun run db:studio          # Drizzle Studio
+bun run typecheck
+bun test
+bun run check
+bun run build
+bun run db:generate -- migration-name
+bun run db:check
+bun run db:migrate
+bun run db:verify
+bun run db:studio
 ```
 
-GitHub Actions 会执行：
+GitHub Actions 执行：
 
 ```text
 bun install --frozen-lockfile
@@ -295,38 +341,17 @@ bun run typecheck
 bun test
 bun run db:check
 bun run build
-PostgreSQL 16: db:migrate → 再次 db:migrate → db:verify
-```
-
-当前迁移已经在 GitHub Actions 的 PostgreSQL 16 服务中通过首次执行、重复幂等和 Schema 完整性验证。
-
-## 目录结构
-
-```text
-src/
-├── agent/            # Agent 抽象、路由和多 Agent 编排
-├── api/
-│   ├── errors/       # 结构化 API 错误
-│   ├── middleware/   # 认证、请求上下文、异常和日志
-│   ├── routes/       # Elysia API 路由
-│   └── schemas/      # 请求与响应 Schema
-├── app/              # 应用构建与进程启动
-├── config/           # 集中环境配置和校验
-├── db/               # 连接、Schema、迁移执行器和 SQL migrations
-├── llm/              # 模型领域接口、Provider 和注册表
-├── services/         # Auth、Agent、Chat、文件、Token、限流和审计服务
-└── tools/            # 工具定义、目录和执行注册表
+PostgreSQL 16: db:migrate → db:migrate → db:verify
 ```
 
 ## 安全约束
 
-- 业务接口仅接受 `Authorization: Bearer ...`
-- Access Token 校验 issuer、audience、类型和有效期
-- Refresh Token 服务端可撤销，且一次刷新后立即失效
-- Agent、会话历史和文件按当前用户隔离
-- 生产环境必须显式配置强 JWT 密钥
-- Agent 工具使用注册白名单
-- 上传文件默认限制为 10 MiB，并校验存储路径边界
-- 管理日志接口需要显式管理员权限
-- 数据库通过外键、唯一索引和 CHECK 约束维护关键不变量
-- 生产数据库使用版本化 SQL 迁移，不修改已应用迁移
+- 业务接口仅接受 Bearer Token。
+- Access Token 校验 issuer、audience、类型和有效期。
+- Refresh Token 可撤销并执行轮换。
+- Agent、会话、文件按用户隔离。
+- Tool 使用注册白名单和 Agent owner 约束。
+- 上传文件限制大小并校验路径边界。
+- 管理日志需要管理员权限。
+- 数据库外键、唯一索引和 CHECK 约束维护关键不变量。
+- 生产数据库只使用向前追加的版本化迁移。

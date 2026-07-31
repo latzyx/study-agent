@@ -1,10 +1,72 @@
 import type {Agent, AgentConfig, AgentEvent, AgentRunOptions} from './types/agent'
-import type {LLMProvider, LLMToolCall, LLMUsage} from '../llm/domain/llm-provider'
+import type {
+    LLMMessage,
+    LLMProvider,
+    LLMToolCall,
+    LLMUsage,
+} from '../llm/domain/llm-provider'
 import type {Tool} from '../tools/domain/tool'
-import type {ToolRegistry} from '../tools/registry/tool-registry'
+import type {ToolRegistry, ToolScope} from '../tools/registry/tool-registry'
+
+const DEFAULT_MAX_STEPS = 5
+const DEFAULT_MAX_HISTORY_MESSAGES = 50
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 20_000
+
+function normalizePositiveInteger(value: number | undefined, fallback: number, name: string): number {
+    if (value === undefined) return fallback
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer`)
+    }
+
+    return value
+}
+
+function normalizeOptionalPositiveInteger(value: number | undefined, name: string): number | undefined {
+    if (value === undefined) return undefined
+    return normalizePositiveInteger(value, value, name)
+}
+
+function normalizeRequiredString(value: string | undefined, name: string): string {
+    const normalized = value?.trim()
+    if (!normalized) throw new Error(`${name} must be configured`)
+    return normalized
+}
+
+function toolNames(tools: readonly Tool[]): string {
+    return tools.map((tool) => tool.name).join('\u0000')
+}
+
+function serializeToolResult(result: unknown, maxChars: number): string {
+    const seen = new WeakSet<object>()
+    let serialized: string
+
+    try {
+        serialized = JSON.stringify(result, (_key, value: unknown) => {
+            if (typeof value === 'bigint') return value.toString()
+            if (typeof value !== 'object' || value === null) return value
+            if (seen.has(value)) return '[Circular]'
+            seen.add(value)
+            return value
+        })
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        serialized = JSON.stringify({error: 'TOOL_RESULT_SERIALIZATION_FAILED', message})
+    }
+
+    if (serialized === undefined) serialized = JSON.stringify(null)
+    if (serialized.length <= maxChars) return serialized
+
+    return JSON.stringify({
+        truncated: true,
+        originalChars: serialized.length,
+        content: serialized.slice(0, maxChars),
+    })
+}
 
 export abstract class BaseAgent implements Agent {
     private toolsRegistered = false
+    private agentTools: ReadonlyMap<string, Tool> | undefined
+    private readonly toolScope: ToolScope = Symbol('agent-tool-scope')
 
     constructor(
         public config: AgentConfig,
@@ -12,41 +74,108 @@ export abstract class BaseAgent implements Agent {
         protected readonly toolRegistry: ToolRegistry,
     ) {}
 
-    abstract getTools(): Tool[]
+    getTools(): Tool[] {
+        return this.config.tools ? [...this.config.tools] : []
+    }
 
-    private ensureToolsRegistered(): void {
-        if (this.toolsRegistered) return
+    private ensureToolsRegistered(): ReadonlyMap<string, Tool> {
+        if (this.toolsRegistered && this.agentTools) return this.agentTools
 
-        for (const tool of this.getTools()) this.toolRegistry.register(tool)
+        const tools = this.getTools()
+        if (
+            this.config.tools !== undefined
+            && toolNames(this.config.tools) !== toolNames(tools)
+        ) {
+            throw new Error('Agent config.tools conflicts with getTools(); use one authoritative tool source')
+        }
+
+        const toolMap = new Map<string, Tool>()
+        for (const tool of tools) {
+            if (toolMap.has(tool.name)) {
+                throw new Error(`Agent tool declared more than once: ${tool.name}`)
+            }
+
+            this.toolRegistry.register(tool, this.toolScope)
+            toolMap.set(tool.name, tool)
+        }
+
+        this.agentTools = toolMap
         this.toolsRegistered = true
+        return toolMap
     }
 
     async *run(input: string, options: AgentRunOptions = {}): AsyncGenerator<AgentEvent> {
-        this.ensureToolsRegistered()
+        let agentTools: ReadonlyMap<string, Tool>
+        try {
+            agentTools = this.ensureToolsRegistered()
+        } catch (error) {
+            yield {type: 'error', error: error instanceof Error ? error : new Error(String(error))}
+            return
+        }
 
-        const messages = [
-            {role: 'system' as const, content: this.config.systemPrompt},
-            ...(options.history ?? []).filter((message) => message.role !== 'system'),
-            {role: 'user' as const, content: input},
+        const normalizedInput = input.trim()
+        if (!normalizedInput) {
+            yield {type: 'error', error: new Error('Agent input cannot be empty')}
+            return
+        }
+
+        if (options.abortSignal?.aborted) {
+            yield {type: 'error', error: new Error('Agent run was aborted before execution')}
+            return
+        }
+
+        let maxSteps: number
+        let maxHistoryMessages: number
+        let maxToolResultChars: number
+        let llmTimeoutMs: number | undefined
+        let model: string
+
+        try {
+            maxSteps = normalizePositiveInteger(this.config.maxSteps, DEFAULT_MAX_STEPS, 'maxSteps')
+            maxHistoryMessages = normalizePositiveInteger(
+                this.config.maxHistoryMessages,
+                DEFAULT_MAX_HISTORY_MESSAGES,
+                'maxHistoryMessages',
+            )
+            maxToolResultChars = normalizePositiveInteger(
+                this.config.maxToolResultChars,
+                DEFAULT_MAX_TOOL_RESULT_CHARS,
+                'maxToolResultChars',
+            )
+            llmTimeoutMs = normalizeOptionalPositiveInteger(this.config.llmTimeoutMs, 'llmTimeoutMs')
+            model = normalizeRequiredString(this.config.modelId, 'modelId')
+        } catch (error) {
+            yield {type: 'error', error: error instanceof Error ? error : new Error(String(error))}
+            return
+        }
+
+        const history = (options.history ?? [])
+            .filter((message) => message.role !== 'system')
+            .slice(-maxHistoryMessages)
+        const messages: LLMMessage[] = [
+            {role: 'system', content: this.config.systemPrompt},
+            ...history,
+            {role: 'user', content: normalizedInput},
         ]
-        const tools = this.toolRegistry.list().map((tool) => ({
+        const tools = [...agentTools.values()].map((tool) => ({
             name: tool.name,
             description: tool.description,
-            inputSchema: tool.inputSchema as any,
+            inputSchema: tool.inputSchema,
         }))
-        const maxSteps = this.config.maxSteps ?? 5
-        const model = this.config.modelId ?? this.config.modelProfile
 
         for (let step = 1; step <= maxSteps; step++) {
             const pendingToolCalls: LLMToolCall[] = []
+            const pendingToolCallIds = new Set<string>()
             let fullText = ''
             let usage: LLMUsage | undefined
+            let providerFinished = false
 
             for await (const event of this.llmProvider.stream({
                 model,
                 messages,
                 tools,
                 abortSignal: options.abortSignal,
+                timeoutMs: llmTimeoutMs,
             })) {
                 if (event.type === 'text-delta') {
                     fullText += event.text
@@ -55,6 +184,23 @@ export abstract class BaseAgent implements Agent {
                 }
 
                 if (event.type === 'tool-call') {
+                    if (!agentTools.has(event.toolCall.name)) {
+                        yield {
+                            type: 'error',
+                            error: new Error(`Model requested a tool not enabled for this agent: ${event.toolCall.name}`),
+                        }
+                        return
+                    }
+
+                    if (!event.toolCall.id || pendingToolCallIds.has(event.toolCall.id)) {
+                        yield {
+                            type: 'error',
+                            error: new Error(`Model returned an invalid or duplicate toolCallId: ${event.toolCall.id}`),
+                        }
+                        return
+                    }
+
+                    pendingToolCallIds.add(event.toolCall.id)
                     pendingToolCalls.push(event.toolCall)
                     yield {type: 'tool-call', toolCall: event.toolCall}
                     continue
@@ -67,6 +213,7 @@ export abstract class BaseAgent implements Agent {
 
                 if (event.type === 'finish') {
                     usage = event.response.usage ?? usage
+                    providerFinished = true
                     break
                 }
 
@@ -76,21 +223,36 @@ export abstract class BaseAgent implements Agent {
                 }
             }
 
+            if (!providerFinished) {
+                yield {
+                    type: 'error',
+                    error: new Error(`LLM provider stream ended without finish at step ${step}`),
+                }
+                return
+            }
+
             if (pendingToolCalls.length === 0) {
                 yield {type: 'finish', usage}
                 return
             }
 
-            if (fullText.trim()) {
-                messages.push({role: 'assistant', content: fullText})
-            }
+            messages.push({
+                role: 'assistant',
+                content: fullText,
+                toolCalls: pendingToolCalls,
+            })
 
             for (const toolCall of pendingToolCalls) {
+                if (options.abortSignal?.aborted) {
+                    yield {type: 'error', error: new Error('Agent run was aborted before tool execution')}
+                    return
+                }
+
                 try {
                     const result = await this.toolRegistry.execute(toolCall, {
                         ...options.toolContext,
                         abortSignal: options.abortSignal,
-                    })
+                    }, this.toolScope)
                     yield {
                         type: 'tool-result',
                         toolResult: {
@@ -100,8 +262,10 @@ export abstract class BaseAgent implements Agent {
                         },
                     }
                     messages.push({
-                        role: 'user',
-                        content: `Tool ${toolCall.name} result: ${JSON.stringify(result)}`,
+                        role: 'tool',
+                        name: toolCall.name,
+                        toolCallId: toolCall.id,
+                        content: serializeToolResult(result, maxToolResultChars),
                     })
                 } catch (error) {
                     yield {

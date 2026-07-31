@@ -10,6 +10,9 @@ export interface AgentConfig {
     modelProfile: ModelProfile
     modelId?: string
     maxSteps?: number
+    maxHistoryMessages?: number
+    llmTimeoutMs?: number
+    maxToolResultChars?: number
     tools?: Tool[]
 }
 
