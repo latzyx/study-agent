@@ -40,6 +40,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
             const result = await executeChat({
                 userId: user.sub,
                 agentId: body.agentId,
+                agentKey: body.agentKey,
                 message: body.message,
                 sessionId: body.sessionId,
                 abortSignal: request.signal,
@@ -67,6 +68,7 @@ export const chatRoutes = new Elysia({prefix: '/chat'})
                         for await (const event of streamChat({
                             userId: user.sub,
                             agentId: body.agentId,
+                            agentKey: body.agentKey,
                             message: body.message,
                             sessionId: body.sessionId,
                             abortSignal: request.signal,
