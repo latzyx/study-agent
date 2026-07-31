@@ -8,8 +8,10 @@ import {createApiError} from '../api/errors/api-error.js'
 import {env} from '../config/env.js'
 import {db} from '../db/index.js'
 import {agents, conversations, messages} from '../db/schema.js'
+import {defaultIntentRouter} from '../intent/index.js'
+import type {BuiltinAgentKey} from '../intent/domain/intent.js'
 import type {LLMMessage, LLMUsage} from '../llm/domain/llm-provider.js'
-import {findUserAgent} from './agent-service.js'
+import {findUserAgent, findUserAgentByKey} from './agent-service.js'
 import {toAgentExecutionApiError} from './agent-execution-error.js'
 import {
     buildTurnMessageRows,
@@ -23,7 +25,8 @@ const HISTORY_QUERY_LIMIT = HISTORY_MESSAGE_LIMIT * 3
 
 export interface ChatInput {
     userId: string
-    agentId: string
+    agentId?: string
+    agentKey?: BuiltinAgentKey
     message: string
     sessionId?: string
     abortSignal?: AbortSignal
@@ -34,10 +37,14 @@ export interface ToolCallRecord extends PersistedToolCall {}
 export interface ChatResult {
     reply: string
     sessionId: string
+    agentId: string
+    agentKey: BuiltinAgentKey
+    runtimeFingerprint: string
     toolCalls: Array<Omit<ToolCallRecord, 'id'>>
 }
 
 export type ChatStreamEvent =
+    | {type: 'route'; agentId: string; agentKey: BuiltinAgentKey; runtimeFingerprint: string}
     | {type: 'text-delta'; content: string}
     | {type: 'tool-call'; id: string; name: string; args: unknown}
     | {type: 'tool-result'; id: string; name: string; result: unknown}
@@ -46,6 +53,7 @@ export type ChatStreamEvent =
 
 interface PreparedExecution {
     runtime: AgentRuntimeDescriptor
+    agentId: string
     conversation: typeof conversations.$inferSelect
     history: LLMMessage[]
     normalizedMessage: string
@@ -107,6 +115,7 @@ function ensureConversationAgent(
             409,
             'SESSION_AGENT_MISMATCH',
             'The session is already associated with another agent',
+            {sessionAgentId: conversation.agentId, requestedAgentId: agentId},
         )
     }
 
@@ -131,6 +140,81 @@ async function getOrCreateConversation(userId: string, agentId: string, sessionI
     }
 
     return ensureConversationAgent(concurrent, agentId)
+}
+
+async function resolveAgentForNewConversation(input: ChatInput, normalizedMessage: string) {
+    const explicitAgentId = input.agentId?.trim()
+    if (explicitAgentId) return findUserAgent(input.userId, explicitAgentId)
+
+    let decision
+    try {
+        decision = await defaultIntentRouter.route(normalizedMessage, {
+            requestedAgentKey: input.agentKey,
+        })
+    } catch (error) {
+        throw createApiError(
+            500,
+            'INTENT_ROUTING_FAILED',
+            env.isProduction
+                ? 'Unable to route the request'
+                : error instanceof Error ? error.message : 'Unable to route the request',
+        )
+    }
+
+    if (decision.requiresClarification) {
+        throw createApiError(
+            409,
+            'INTENT_AMBIGUOUS',
+            'The request matches multiple agents and requires clarification',
+            {
+                confidence: decision.confidence,
+                candidates: decision.candidates,
+            },
+        )
+    }
+
+    return findUserAgentByKey(input.userId, decision.selectedAgentKey)
+}
+
+async function resolveConversationAndAgent(input: ChatInput, normalizedMessage: string) {
+    const requestedSessionId = input.sessionId?.trim()
+    if (requestedSessionId) {
+        const existing = await findConversationBySession(input.userId, requestedSessionId)
+        if (existing) {
+            if (input.agentId?.trim()) ensureConversationAgent(existing, input.agentId.trim())
+
+            const agentRow = await findUserAgent(input.userId, existing.agentId)
+            const runtime = createRuntime(agentRow)
+            if (input.agentKey && runtime.agentKey !== input.agentKey) {
+                throw createApiError(
+                    409,
+                    'SESSION_AGENT_KEY_MISMATCH',
+                    'The session is already associated with another agent runtime key',
+                    {sessionAgentKey: runtime.agentKey, requestedAgentKey: input.agentKey},
+                )
+            }
+
+            return {agentRow, conversation: existing, runtime}
+        }
+    }
+
+    const agentRow = await resolveAgentForNewConversation(input, normalizedMessage)
+    const runtime = createRuntime(agentRow)
+    if (input.agentKey && runtime.agentKey !== input.agentKey) {
+        throw createApiError(
+            409,
+            'AGENT_KEY_MISMATCH',
+            'The selected agent does not match the requested runtime key',
+            {selectedAgentKey: runtime.agentKey, requestedAgentKey: input.agentKey},
+        )
+    }
+
+    const conversation = await getOrCreateConversation(
+        input.userId,
+        agentRow.id,
+        requestedSessionId,
+    )
+    return {agentRow, conversation, runtime}
 }
 
 async function loadConversationHistory(conversationId: string): Promise<LLMMessage[]> {
@@ -213,15 +297,15 @@ async function prepareExecution(input: ChatInput): Promise<PreparedExecution> {
         throw createApiError(499, 'REQUEST_ABORTED', 'Request was aborted before execution')
     }
 
-    const agentRow = await findUserAgent(input.userId, input.agentId)
-    const conversation = await getOrCreateConversation(input.userId, input.agentId, input.sessionId)
-    const lease = await acquireChatExecutionLease(input.userId, conversation.sessionId)
+    const resolved = await resolveConversationAndAgent(input, normalizedMessage)
+    const lease = await acquireChatExecutionLease(input.userId, resolved.conversation.sessionId)
 
     try {
         return {
-            runtime: createRuntime(agentRow),
-            conversation,
-            history: await loadConversationHistory(conversation.id),
+            runtime: resolved.runtime,
+            agentId: resolved.agentRow.id,
+            conversation: resolved.conversation,
+            history: await loadConversationHistory(resolved.conversation.id),
             normalizedMessage,
             lease,
         }
@@ -261,6 +345,9 @@ export async function executeChat(input: ChatInput): Promise<ChatResult> {
         return {
             reply: state.reply,
             sessionId: execution.conversation.sessionId,
+            agentId: execution.agentId,
+            agentKey: execution.runtime.agentKey,
+            runtimeFingerprint: execution.runtime.fingerprint,
             toolCalls: state.toolCalls.map(({id: _id, ...call}) => call),
         }
     } finally {
@@ -273,6 +360,13 @@ export async function *streamChat(input: ChatInput): AsyncGenerator<ChatStreamEv
     const state = createExecutionState()
 
     try {
+        yield {
+            type: 'route',
+            agentId: execution.agentId,
+            agentKey: execution.runtime.agentKey,
+            runtimeFingerprint: execution.runtime.fingerprint,
+        }
+
         for await (const event of execution.runtime.agent.run(execution.normalizedMessage, {
             history: execution.history,
             abortSignal: input.abortSignal,
