@@ -1,7 +1,14 @@
 import {t} from 'elysia'
 
+const builtinAgentKey = t.Union([
+    t.Literal('general'),
+    t.Literal('math'),
+    t.Literal('time'),
+])
+
 const chatRequestBody = t.Object({
-    agentId: t.String({format: 'uuid'}),
+    agentId: t.Optional(t.String({format: 'uuid'})),
+    agentKey: t.Optional(builtinAgentKey),
     message: t.String({minLength: 1, maxLength: 20_000}),
     sessionId: t.Optional(t.String({minLength: 1, maxLength: 100})),
 })
@@ -14,6 +21,9 @@ export const chatResponse = t.Object({
     data: t.Object({
         reply: t.String(),
         sessionId: t.String(),
+        agentId: t.String({format: 'uuid'}),
+        agentKey: builtinAgentKey,
+        runtimeFingerprint: t.String({minLength: 64, maxLength: 64}),
         toolCalls: t.Array(
             t.Object({
                 name: t.String(),
