@@ -4,6 +4,7 @@ import {createApiError} from '../api/errors/api-error.js'
 import {inferAgentKeyFromTools} from '../agents/catalog.js'
 import {db} from '../db/index.js'
 import {agents} from '../db/schema.js'
+import type {BuiltinAgentKey} from '../intent/domain/intent.js'
 import {findUnknownBuiltinTools} from '../tools/builtin/index.js'
 
 export interface AgentListInput {
@@ -36,6 +37,7 @@ export interface UpdateAgentInput {
 export function serializeAgent(agent: typeof agents.$inferSelect) {
     return {
         ...agent,
+        agentKey: inferAgentKeyFromTools(agent.tools),
         description: agent.description ?? undefined,
         systemPrompt: agent.systemPrompt ?? undefined,
         createdAt: agent.createdAt.toISOString(),
@@ -126,6 +128,43 @@ export async function findUserAgent(userId: string, agentId: string) {
 
     if (!agent) agentNotFound()
     return agent
+}
+
+export async function findUserAgentByKey(userId: string, agentKey: BuiltinAgentKey) {
+    const ownedAgents = await db.select().from(agents)
+        .where(eq(agents.createdBy, userId))
+        .orderBy(desc(agents.updatedAt), desc(agents.createdAt))
+
+    const matches = ownedAgents.filter((agent) => {
+        try {
+            return inferAgentKeyFromTools(agent.tools) === agentKey
+        } catch {
+            return false
+        }
+    })
+
+    if (matches.length === 0) {
+        throw createApiError(
+            404,
+            'AGENT_BINDING_NOT_FOUND',
+            `No agent is bound to runtime key: ${agentKey}`,
+            {agentKey},
+        )
+    }
+
+    if (matches.length > 1) {
+        throw createApiError(
+            409,
+            'AGENT_BINDING_AMBIGUOUS',
+            `Multiple agents are bound to runtime key: ${agentKey}`,
+            {
+                agentKey,
+                agentIds: matches.map((agent) => agent.id),
+            },
+        )
+    }
+
+    return matches[0]!
 }
 
 export async function updateUserAgent(input: UpdateAgentInput) {
